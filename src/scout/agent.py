@@ -37,6 +37,7 @@ from .prompts import (
 )
 from .tools.analysis import (
     gap_analysis,
+    list_known_jobs,
     read_candidate_profile,
     read_job_dossier,
     remember_preference,
@@ -134,6 +135,7 @@ async def build_tools(*, guest: bool = False) -> tuple[list[BaseTool], list[Base
 
     orchestrator: list[BaseTool] = [
         research_jobs,
+        list_known_jobs,
         score_jobs,
         gap_analysis,
         *tavily,

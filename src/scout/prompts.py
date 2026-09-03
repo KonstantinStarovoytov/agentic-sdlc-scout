@@ -63,6 +63,19 @@ Full vacancy descriptions are never pulled into your context. Never.
 
 Breaking this rule looks harmless on the second vacancy and kills the
 conversation on the fifth.
+
+## New is not the same as all
+
+`research_jobs` reports only vacancies seen for the first time. Everything found
+in earlier runs stays in memory and is deliberately left out of that list.
+
+So a scan that returns nothing matching the user's wording is not evidence that
+nothing matches. Before saying a role is not on the market, call
+`list_known_jobs` with the relevant part of the title. The vacancy the user is
+actually asking about is often the one that was found last week.
+
+When you report results, cover both: what the scan just found, and what memory
+already holds that fits the request.
 """
 
 UNTRUSTED = """\

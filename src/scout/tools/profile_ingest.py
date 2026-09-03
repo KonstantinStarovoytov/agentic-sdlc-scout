@@ -47,6 +47,16 @@ def extract_text_from_file(path: Path | str) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
+    # A directory reaches the extension check with an empty suffix and comes back
+    # as "unsupported format: ." — which sends the reader looking for a converter
+    # when the actual mistake was pointing at a folder. It has happened: the
+    # model passed the repository root and the report blamed the format.
+    if file_path.is_dir():
+        raise ValueError(
+            f"{file_path} is a directory, not a file. Give the path to the CV itself, "
+            "e.g. data/private/cv.pdf."
+        )
+
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
         from pypdf import PdfReader
@@ -132,8 +142,9 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
     from it must not be used in a CV or in scoring.
 
     Args:
-        cv_path: path to the CV file. Defaults to the value in
-            `config/search.yaml`.
+        cv_path: path to the CV file. Leave it empty unless the user gave an
+            explicit path — the configured default is already correct, and a
+            guessed one silently reports the CV as unreadable.
 
     Returns:
         A short report on what was read, what is missing, and what to ask the user.

@@ -22,6 +22,13 @@ services:
       SCOUT_LINKEDIN_MCP_COMMAND: ""
     ports:
       - "8080:8080"
+    volumes:
+      # The CV is deliberately absent from the image — it is personal data and
+      # images get pushed to registries. It is mounted instead, read-only, so
+      # bootstrap_profile can build the Candidate Profile in a container too.
+      # The agent's own filesystem tools still cannot reach this path; only the
+      # ingest tool reads it, and contacts are redacted before any model call.
+      - ./data/private:/app/data/private:ro
     restart: unless-stopped
 
   openwebui:

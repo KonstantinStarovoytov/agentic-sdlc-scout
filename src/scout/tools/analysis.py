@@ -67,6 +67,66 @@ async def _load_jobs(store: BaseStore, user_id: str, job_ids: list[str] | None) 
     return jobs
 
 
+@tool
+async def list_known_jobs(
+    title_contains: str | None = None,
+    location_contains: str | None = None,
+    work_mode: str | None = None,
+    limit: int = 30,
+) -> str:
+    """List vacancies already in memory, newest first.
+
+    `research_jobs` reports only what a scan found for the first time, because
+    re-listing hundreds of known vacancies on every run would drown the context.
+    The consequence is that the best match becomes invisible the moment it stops
+    being new, so this is how a vacancy is found again: search memory before
+    concluding that something is not there.
+
+    Args:
+        title_contains: case-insensitive substring of the job title, e.g. "agentic".
+        location_contains: case-insensitive substring of the location.
+        work_mode: one of remote, hybrid, onsite.
+        limit: how many to return at most.
+
+    Returns:
+        One compact card per vacancy, or a note that memory holds nothing matching.
+    """
+    store = _store()
+    if store is None:
+        return "Memory is unavailable, so nothing can be listed."
+
+    jobs = await _load_jobs(store, current_user_id(), None)
+    if not jobs:
+        return "Memory holds no vacancies yet. Run research_jobs first."
+
+    total = len(jobs)
+    if title_contains:
+        needle = title_contains.lower()
+        jobs = [j for j in jobs if needle in j.title.lower()]
+    if location_contains:
+        needle = location_contains.lower()
+        jobs = [j for j in jobs if needle in (j.location or "").lower()]
+    if work_mode:
+        jobs = [j for j in jobs if j.work_mode.value == work_mode.lower()]
+
+    if not jobs:
+        return (
+            f"None of the {total} vacancies in memory match that filter. "
+            "Try a broader one, or run research_jobs to collect more."
+        )
+
+    jobs.sort(key=lambda j: j.posted_at or "", reverse=True)
+    shown = jobs[:limit]
+    lines = [f"{len(jobs)} of {total} stored vacancies match; showing {len(shown)}:"]
+    lines += [
+        f"- [{j.canonical_id}] {j.title} - {j.company} | {j.location or 'location not stated'}"
+        f" | {j.seniority.value} | {j.work_mode.value}"
+        f" | requirements: {len(j.requirements)} | {j.posted_at or 'date not stated'}"
+        for j in shown
+    ]
+    return "\n".join(lines)
+
+
 def _format_dossier(job: JobPosting) -> str:
     """Render a stored dossier for a subagent, description last and marked untrusted."""
     from ..middleware.injection_guard import wrap_untrusted
