@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.local
+*.pem
+
+# Personal data and generated documents
+data/private/
+artifacts/
+out/
+*.pdf
+*.docx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# LangGraph
+.langgraph_api/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,82 @@
+# What to search for, where, and under which limits. Changed without touching code.
+
+search:
+  # Track roles and adjacent ones. Order = priority when the budget runs out.
+  roles:
+    - "Agentic SDLC Engineer"
+    - "AI Engineer"
+    - "LLM Engineer"
+    - "AI Platform Engineer"
+    - "Machine Learning Engineer"
+    - "Developer Productivity Engineer"
+    - "Platform Engineer"
+
+  locations:
+    - "Warsaw, Mazowieckie, Poland"
+    - "Poland"
+
+  # The LinkedIn guest endpoint understands these codes
+  remote_modes: ["onsite", "remote", "hybrid"]
+
+  # Vacancies older than this are dropped by the prefilter
+  freshness_days: 30
+
+  # How many cards to pull per scan run
+  max_results_per_role: 25
+
+filters:
+  # Prefilter applied before spending a LinkedIn request
+  seniority_allow: ["mid", "senior", "staff", "lead"]
+  seniority_deny: ["intern", "junior", "principal", "director", "vp"]
+
+  # Stop-lists. The agent extends them from user feedback, but whatever is set
+  # here takes priority and is never overwritten.
+  company_deny: []
+  title_deny_keywords:
+    - "sales"
+    - "recruiter"
+    - "unpaid"
+
+budgets:
+  # The main protection for the LinkedIn burner account
+  linkedin_calls_per_run: 15
+  linkedin_calls_per_hour: 40
+  linkedin_min_delay_seconds: 3.0
+  linkedin_max_delay_seconds: 8.0
+
+  # Cost ceiling for a single run
+  max_tokens_per_run: 400000
+  max_tool_calls_per_run: 120
+
+  tavily_calls_per_run: 20
+
+scoring:
+  # Weights of the four rubric components, summing to 100
+  weights:
+    must_have_overlap: 55
+    transferable: 20
+    signals: 15
+    seniority_fit: 10
+
+  # Discount factor applied to transferable skills
+  transferable_discount: 0.5
+
+  # Score ceiling when the hard-requirements gate fails.
+  # The vacancy is labelled honestly rather than nudged up to a nicer figure.
+  hard_gate_fail_cap: 39
+
+  thresholds:
+    apply_now: 70          # >= means apply now
+    apply_after_gap: 45    # >= means apply after closing one specific gap
+                           # below that, skip it
+
+profile:
+  # Where the user's source CV lives, for building the Candidate Profile
+  cv_path: "data/private/cv.pdf"
+
+taxonomy:
+  # How many vacancies to collect in bootstrap_taxonomy mode
+  bootstrap_target: 40
+  # Share of vacancies a skill must appear in to count as core
+  core_threshold: 0.5
+  peripheral_threshold: 0.2

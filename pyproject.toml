@@ -1,0 +1,105 @@
+[project]
+name = "agentic-sdlc-scout"
+version = "0.1.0"
+description = "Agent that researches Agentic SDLC Engineer vacancies and scores profile fit"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "deepagents>=0.7.13",
+    "langgraph>=1.2.11",
+    "langchain>=1.3.18",
+    "langchain-openai>=1.6.0",
+    "langchain-mcp-adapters>=0.3.2",
+    "langgraph-checkpoint-postgres>=3.1.2",
+    # langgraph-checkpoint-postgres does not pull the driver itself
+    "psycopg[binary,pool]>=3.2",
+    "langchain-tavily>=0.2.18",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+]
+
+[project.scripts]
+scout = "scout.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "tox>=4.23",
+    "pre-commit>=4.0",
+    "types-pyyaml>=6.0",
+    "langgraph-cli[inmem]>=0.4.31",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scout"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+    "D",    # pydocstyle
+    "ASYNC",
+    "S",    # bandit
+    "PTH",  # prefer pathlib
+    "TID",  # tidy imports
+]
+ignore = [
+    "D203",   # incompatible with D211
+    "D213",   # incompatible with D212
+    "D107",   # the class docstring documents construction; __init__ adds nothing
+    "S101",   # asserts are how tests are written
+    "B008",   # LangChain tool decorators rely on call-in-default patterns
+    "TID252", # intra-package relative imports are the convention in src/scout
+    "RUF001", # ambiguous unicode: the CV skills deliberately use typographic dashes
+    "RUF002",
+    "RUF003",
+]
+
+# Google docstring sections ("Args:", "Returns:") are not a style preference here:
+# LangChain parses them to build the JSON schema a model sees for each tool.
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S105", "S106", "S108", "ASYNC109"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/scout"]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live: reaches external services, not run in CI",
+]

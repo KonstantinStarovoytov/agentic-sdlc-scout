@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "scout": "./src/scout/agent.py:build_agent",
+    "research": "./src/scout/graphs/research.py:build_research_graph"
+  },
+  "env": ".env",
+  "python_version": "3.12"
+}
