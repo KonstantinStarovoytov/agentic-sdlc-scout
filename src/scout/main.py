@@ -88,6 +88,15 @@ def main() -> None:
         print(message, file=sys.stderr)
         raise SystemExit(1)
 
+    if settings.has_langsmith:
+        logging.getLogger(__name__).info(
+            "Tracing to LangSmith project %r", settings.langsmith_project or "default"
+        )
+    else:
+        logging.getLogger(__name__).info(
+            "LangSmith tracing is off; set LANGSMITH_TRACING and LANGSMITH_API_KEY to enable it"
+        )
+
     thread_id = args.thread or f"cli-{uuid.uuid4().hex[:8]}"
     if args.prompt:
         asyncio.run(run_once(" ".join(args.prompt), thread_id=thread_id, verbose=args.verbose))

@@ -11,11 +11,35 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "search.yaml"
+ENV_PATH = REPO_ROOT / ".env"
+
+
+def load_env_file(path: Path | None = None) -> None:
+    """Copy `.env` into the process environment.
+
+    `Settings` reads the file directly, so this is not for us — it is for every
+    library that resolves its own configuration from the environment and never
+    sees a pydantic model. LangSmith is the clearest case: `LANGSMITH_TRACING`
+    and `LANGSMITH_API_KEY` can be set correctly in `.env` and tracing still
+    never starts, because the tracer only looks at `os.environ`.
+
+    Real environment variables win, matching how `Settings` resolves the same
+    conflict. Called at import so it is in place before anything reads its
+    configuration; importing this module is the first thing the package does.
+    """
+    env_path = path or ENV_PATH
+    if not env_path.exists():
+        return
+    load_dotenv(env_path, override=False)
+
+
+load_env_file()
 
 
 class Settings(BaseSettings):
@@ -46,6 +70,13 @@ class Settings(BaseSettings):
     scout_linkedin_profile_url: str | None = None
     scout_personal_site_url: str | None = None
 
+    # Declared so a run can say whether it is being traced. The LangSmith SDK
+    # reads these from the environment rather than from here, which is what
+    # `load_env_file` exists to guarantee.
+    langsmith_tracing: bool = False
+    langsmith_api_key: str | None = None
+    langsmith_project: str | None = None
+
     @property
     def has_postgres(self) -> bool:
         """Whether a Postgres connection string is configured."""
@@ -60,6 +91,11 @@ class Settings(BaseSettings):
     def has_tavily(self) -> bool:
         """Whether a Tavily API key is available."""
         return bool(self.tavily_api_key and self.tavily_api_key.strip())
+
+    @property
+    def has_langsmith(self) -> bool:
+        """Whether runs will actually be traced."""
+        return bool(self.langsmith_tracing and self.langsmith_api_key)
 
 
 class SearchConfig(BaseModel):
