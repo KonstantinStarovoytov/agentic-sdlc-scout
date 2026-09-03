@@ -61,22 +61,55 @@ _SENIORITY_RANK: dict[Seniority, int] = {
 }
 
 
+# Location strings that pin a remote posting to no particular national market,
+# or to one wider than the tracked EU search. Deliberately short: anything more
+# precise needs real geography, and a wrong guess here caps a score at
+# `hard_gate_fail_cap` on a vacancy the user could actually take.
+_UNBOUNDED_LOCATIONS = {
+    "remote",
+    "fully remote",
+    "anywhere",
+    "worldwide",
+    "global",
+    "europe",
+    "eu",
+    "european union",
+    "eea",
+    "european economic area",
+    "emea",
+}
+
+
 def _tokens(value: str | None) -> set[str]:
     if not value:
         return set()
     return {t for t in normalize_skill(value).split() if t}
 
 
+def _is_unbounded_location(value: str) -> bool:
+    """Whether a location string names no market the gate could check against."""
+    return normalize_skill(value) in _UNBOUNDED_LOCATIONS
+
+
 def location_matches(job: JobPosting, allowed_locations: list[str]) -> bool:
-    """Remote always passes; otherwise the locations must share a token."""
-    if job.work_mode is WorkMode.REMOTE:
-        return True
+    """Check the posting's location against the configured ones.
+
+    Being remote is not a free pass. A remote posting still carries the market it
+    hires in, and "remote, but only within the United States" is a real reason
+    the user cannot take the job. What remote does buy is the benefit of the
+    doubt when the stated location names no enforceable market at all.
+    """
     if not allowed_locations:
         return True
     if not job.location:
-        # Unknown location is not punished here; that is the prefilter's job.
+        # The scan queries one configured location at a time, so a blank field is
+        # missing data rather than evidence of the wrong market.
+        return True
+    if job.work_mode is WorkMode.REMOTE and _is_unbounded_location(job.location):
         return True
     job_tokens = _tokens(job.location)
+    if not job_tokens:
+        return True
     return any(_tokens(loc) & job_tokens for loc in allowed_locations)
 
 
@@ -95,7 +128,11 @@ def check_hard_gate(job: JobPosting, profile: CandidateProfile, config: ScoutCon
     failures: list[str] = []
 
     if not location_matches(job, config.search.locations):
-        failures.append(f"location: {job.location} outside {config.search.locations}")
+        # The work mode is named because a capped remote vacancy is the case the
+        # user is most likely to want to argue with.
+        failures.append(
+            f"location: {job.location} ({job.work_mode.value}) outside {config.search.locations}"
+        )
 
     if job.visa_sponsorship is False and not profile.work_authorization:
         failures.append("no visa sponsorship, and the profile states no right to work")

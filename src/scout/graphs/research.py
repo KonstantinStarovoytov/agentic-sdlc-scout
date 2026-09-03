@@ -140,6 +140,10 @@ async def scan_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
             locations=locations,
             freshness_days=config.search.freshness_days,
             max_results_per_role=limit,
+            # One pass per configured mode. It costs extra requests, but it is
+            # the only way LinkedIn tells us the work mode at scan time, and the
+            # location gate in scoring.py is worthless without it.
+            work_modes=config.search.remote_modes or None,
         )
     except Exception as exc:
         logger.warning("Guest scan failed: %s", exc)

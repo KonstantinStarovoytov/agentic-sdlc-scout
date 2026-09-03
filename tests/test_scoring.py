@@ -103,8 +103,14 @@ class TestHardGate:
     def test_passes_for_matching_location(self, profile, config):
         assert check_hard_gate(_job(), profile, config) == []
 
-    def test_remote_always_passes_location(self, profile, config):
+    def test_remote_in_another_market_does_not_pass_location(self, profile, config):
+        """Remote is not a free pass: a posting still hires in one market."""
         job = _job(location="Lisbon, Portugal", work_mode=WorkMode.REMOTE)
+        failures = check_hard_gate(job, profile, config)
+        assert len(failures) == 1 and "location" in failures[0]
+
+    def test_remote_without_a_stated_market_passes_location(self, profile, config):
+        job = _job(location="Remote", work_mode=WorkMode.REMOTE)
         assert check_hard_gate(job, profile, config) == []
 
     def test_wrong_location_fails(self, profile, config):
