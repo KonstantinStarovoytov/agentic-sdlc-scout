@@ -144,6 +144,9 @@ class BudgetsConfig(BaseModel):
     linkedin_calls_per_hour: int = 40
     linkedin_min_delay_seconds: float = 3.0
     linkedin_max_delay_seconds: float = 8.0
+    # Anonymous reads of public job pages. Nothing here can be banned, but too
+    # many from one address earn a 429 that stops the scan for everyone.
+    public_page_fetches_per_run: int = 40
     max_tokens_per_run: int = 400_000
     max_tool_calls_per_run: int = 120
     tavily_calls_per_run: int = 20

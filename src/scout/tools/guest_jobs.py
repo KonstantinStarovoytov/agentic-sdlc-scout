@@ -26,9 +26,19 @@ from ..schemas import JobPosting, Seniority, WorkMode, canonical_job_id
 logger = logging.getLogger(__name__)
 
 GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+PUBLIC_JOB_URL = "https://www.linkedin.com/jobs/view"
 
 # The guest endpoint returns 25 cards per page.
 PAGE_SIZE = 25
+
+# Where the description sits on the public job page, most specific first. The
+# markup has been renamed before; when it is again, the symptom is every
+# posting coming back with no description, and this list is the place to look.
+_DESCRIPTION_SELECTORS = (
+    "div.show-more-less-html__markup",
+    "div.description__text",
+    "section.description",
+)
 
 _WORK_MODE_CODES = {"onsite": "1", "remote": "2", "hybrid": "3"}
 
@@ -231,6 +241,52 @@ class GuestJobsClient:
                 await asyncio.sleep(random.uniform(self.min_delay, self.max_delay))  # noqa: S311
 
         return results
+
+    async def fetch_description(self, job_id: str) -> str | None:
+        """Read a posting's full description from its public page, without signing in.
+
+        The job view page is what search engines index, so LinkedIn serves it to
+        anonymous readers with the description intact. Until this existed, a
+        container without MCP saved every posting with an empty description, the
+        extractor found no requirements in a title, and the rubric then scored a
+        hundred postings at ten points each with nothing to say about any of
+        them. A profile page needs an account; a posting does not.
+
+        Args:
+            job_id: the numeric LinkedIn id, without the `li:` prefix.
+
+        Returns:
+            The description text, or None when the page is unavailable or carries
+            no description node — an auth wall, a removed posting, a redesign.
+        """
+        url = f"{PUBLIC_JOB_URL}/{job_id}"
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            for attempt in range(self.max_retries):
+                try:
+                    response = await client.get(url, headers=_HEADERS, timeout=self.timeout)
+                except httpx.HTTPError:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                if response.status_code in (429, 503, 999):
+                    await asyncio.sleep((2**attempt) * 2 + random.uniform(0, 1))  # noqa: S311
+                    continue
+                if response.status_code != 200:
+                    return None
+                return parse_job_description(response.text)
+        return None
+
+
+def parse_job_description(html: str) -> str | None:
+    """The description out of a public job view page, or None if there is none."""
+    tree = HTMLParser(html)
+    for selector in _DESCRIPTION_SELECTORS:
+        node = tree.css_first(selector)
+        if node is None:
+            continue
+        text = node.text(separator="\n", strip=True)
+        if text:
+            return text
+    return None
 
 
 async def scan_guest_jobs(

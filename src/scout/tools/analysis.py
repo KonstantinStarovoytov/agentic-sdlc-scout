@@ -15,7 +15,7 @@ from langgraph.store.base import BaseStore
 
 from ..config import get_config
 from ..identity import current_identity, current_user_id
-from ..memory import jobs_ns, load_feedback, profile_ns, save_feedback
+from ..memory import jobs_ns, load_feedback, profile_ns, save_feedback, search_all
 from ..schemas import CandidateProfile, JobPosting, RequirementKind
 from ..scoring import aggregate_gaps, score_job
 
@@ -59,7 +59,11 @@ async def _load_jobs(store: BaseStore, user_id: str, job_ids: list[str] | None) 
                 jobs.append(JobPosting.model_validate(item.value))
         return jobs
 
-    for item in await store.asearch(namespace, limit=200):
+    # The whole corpus, paged. This was a single `asearch(limit=200)`, which was
+    # everything until the corpus grew past it — after which list_known_jobs
+    # reported "none of the 200 vacancies match" while the five target postings
+    # sat in memory as items 201 to 445.
+    for item in await search_all(store, namespace):
         try:
             jobs.append(JobPosting.model_validate(item.value))
         except Exception as exc:

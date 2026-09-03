@@ -2,8 +2,16 @@
 
 search:
   # Track roles and adjacent ones. Order = priority when the budget runs out.
+  #
+  # Phrase them exactly as postings do. LinkedIn's guest search ranks rather
+  # than filters and ignores quotes, so wording decides what surfaces: the query
+  # "Agentic SDLC Engineer" returned none of the five Warsaw postings titled
+  # "Agentic SDLC Senior Engineer", while the exact title returned all of them.
+  # When the market settles on a new wording, add it here as its own line.
   roles:
     - "Agentic SDLC Engineer"
+    - "Agentic SDLC Senior Engineer"
+    - "Agentic SDLC"
     - "AI Engineer"
     - "LLM Engineer"
     - "AI Platform Engineer"
@@ -43,6 +51,9 @@ budgets:
   linkedin_calls_per_hour: 40
   linkedin_min_delay_seconds: 3.0
   linkedin_max_delay_seconds: 8.0
+  # Full descriptions read from public job pages, no account involved. This is
+  # the only source of requirements when LinkedIn MCP is off (every container).
+  public_page_fetches_per_run: 40
 
   # Cost ceiling for a single run
   max_tokens_per_run: 400000

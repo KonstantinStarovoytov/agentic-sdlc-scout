@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import date, timedelta
 from typing import Annotated, Any
 
@@ -34,7 +35,7 @@ from ..schemas import (
     Seniority,
     WorkMode,
 )
-from ..tools.guest_jobs import scan_guest_jobs
+from ..tools.guest_jobs import GuestJobsClient, scan_guest_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -221,48 +222,65 @@ async def enrich_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
         linkedin_degradation_note,
     )
 
+    details_tool = None
     if current_identity().is_guest:
         # This node reaches LinkedIn on its own rather than through the agent's
         # toolset, so withholding the tools from a guest agent does not reach it.
         # Without this the public endpoint would drive the owner's burner
         # account, which is the one LinkedIn resource that can be banned.
         notes.append(
-            "Running in public mode: vacancies are described from the open listing only, "
-            "without signing in to LinkedIn."
+            "Running in public mode: vacancies are described from their public "
+            "pages only, without signing in to LinkedIn."
         )
-        return {"enriched": fresh, "notes": notes}
-
-    tools = await build_linkedin_tools()
-    details_tool = next((t for t in tools if t.name == "get_job_details"), None)
-
-    if details_tool is None:
-        # The reason matters as much as the fact: an expired login and an absent
-        # config both end here, and only one of them the user can act on.
-        reason = linkedin_degradation_note() or "LinkedIn MCP is not connected."
-        notes.append(
-            f"{reason} Requirements were extracted from titles and short cards only, "
-            f"which is noticeably less accurate than parsing a full description."
-        )
-        return {"enriched": fresh, "notes": notes}
+    else:
+        tools = await build_linkedin_tools()
+        details_tool = next((t for t in tools if t.name == "get_job_details"), None)
+        if details_tool is None:
+            # The reason matters as much as the fact: an expired login and an
+            # absent config both end here, and only one of them the user can act on.
+            reason = linkedin_degradation_note() or "LinkedIn MCP is not connected."
+            notes.append(f"{reason} Descriptions were read from the public job pages instead.")
 
     budget = config.budgets.linkedin_calls_per_run
+    public_budget = config.budgets.public_page_fetches_per_run
+    public = GuestJobsClient()
+    public_fetches = 0
+    missing = 0
     enriched: list[JobPosting] = []
 
     for index, job in enumerate(fresh):
-        if index >= budget:
-            notes.append(
-                f"The LinkedIn request budget ({budget}) is exhausted: "
-                f"{len(fresh) - budget} vacancies were left without a full description."
-            )
-            enriched.extend(fresh[index:])
-            break
-        try:
-            raw = await details_tool.ainvoke({"job_id": job.canonical_id.removeprefix("li:")})
-            description = job_description_from(raw)
-            job = job.model_copy(update={"description": description, "source": "linkedin_mcp"})
-        except Exception as exc:
-            logger.info("Could not fetch the description for %s: %s", job.canonical_id, exc)
+        description: str | None = None
+
+        if details_tool is not None and index < budget:
+            try:
+                raw = await details_tool.ainvoke({"job_id": job.canonical_id.removeprefix("li:")})
+                description = job_description_from(raw) or None
+                if description:
+                    job = job.model_copy(update={"source": "linkedin_mcp"})
+            except Exception as exc:
+                logger.info("Could not fetch %s through the account: %s", job.canonical_id, exc)
+
+        if description is None and public_fetches < public_budget:
+            # The public page is the fallback in every case: no account, an
+            # exhausted account budget, or one posting the account could not
+            # read. It is anonymous, so it costs nothing that can be banned, but
+            # it is still LinkedIn's patience being spent, hence its own budget.
+            public_fetches += 1
+            description = await public.fetch_description(job.canonical_id.removeprefix("li:"))
+            await asyncio.sleep(random.uniform(public.min_delay, public.max_delay))  # noqa: S311
+
+        if description:
+            job = job.model_copy(update={"description": description})
+        else:
+            missing += 1
         enriched.append(job)
+
+    if missing:
+        notes.append(
+            f"{missing} of {len(fresh)} vacancies have no full description; their "
+            f"requirements come from the title and card only. Raise "
+            f"budgets.public_page_fetches_per_run in config/search.yaml to read more."
+        )
 
     return {"enriched": enriched, "notes": notes}
 
@@ -435,7 +453,10 @@ async def research_jobs(
     mandatory requirements. Full descriptions stay in memory.
 
     Args:
-        roles: role titles. Defaults to the list in config/search.yaml.
+        roles: extra role titles to search for, on top of the tracked ones in
+            config/search.yaml, which are always searched. Pass the exact title
+            wording as it appears on postings: LinkedIn ranks rather than
+            filters, and a paraphrase can push every real match off the page.
         locations: locations. Defaults to the list in config/search.yaml.
         limit: how many vacancies to pull per role/location combination.
 
@@ -443,8 +464,13 @@ async def research_jobs(
         A compact card list with run statistics and any degradation notes.
     """
     config = get_config()
+    # The tracked roles are the reason this agent exists, and they are phrased
+    # in the config the way postings phrase them. A model rewording them —
+    # "Agentic SDLC Engineer" for a market that titles the job "Agentic SDLC
+    # Senior Engineer" — once dropped every target posting from a run while
+    # returning 124 others. So the config list is a floor, not a default.
     payload: ResearchState = {
-        "roles": roles or config.search.roles,
+        "roles": _merge_roles(config.search.roles, roles),
         "locations": locations or config.search.locations,
         "limit": limit or config.search.max_results_per_role,
         "notes": [],
@@ -455,3 +481,15 @@ async def research_jobs(
         result.get("stats") or {},
         result.get("notes") or [],
     )
+
+
+def _merge_roles(tracked: list[str], extra: list[str] | None) -> list[str]:
+    """Tracked roles first, then whatever else was asked for, without duplicates."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for role in [*tracked, *(extra or [])]:
+        key = role.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(role.strip())
+    return merged
