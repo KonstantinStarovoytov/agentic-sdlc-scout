@@ -34,7 +34,13 @@ from .prompts import (
     JOB_ANALYST_PROMPT,
     build_system_prompt,
 )
-from .tools.analysis import gap_analysis, remember_preference, score_jobs
+from .tools.analysis import (
+    gap_analysis,
+    read_candidate_profile,
+    read_job_dossier,
+    remember_preference,
+    score_jobs,
+)
 from .tools.profile_ingest import bootstrap_profile
 from .tools.render_pdf import render_pdf
 from .tools.tavily import build_tavily_tools
@@ -64,6 +70,26 @@ PRIVATE_PATHS = [
 CV_SKILLS = [SKILLS_DIR]
 
 
+def build_private_deny() -> list[FilesystemPermission]:
+    """The deny rule protecting data/private, shared by the orchestrator and subagents."""
+    return [FilesystemPermission(operations=["read", "write"], paths=PRIVATE_PATHS, mode="deny")]
+
+
+def build_filesystem_middleware(
+    backend: FilesystemBackend, permissions: list[FilesystemPermission]
+) -> FilesystemMiddleware:
+    """Filesystem middleware carrying the restricted toolset and the private-data denial.
+
+    A fresh instance per agent. The harness builds its own unrestricted
+    `FilesystemMiddleware` for every declarative subagent, and the supported way
+    to override it is to put an instance of the same middleware into the
+    subagent's own `middleware` list: entries there replace base-stack middleware
+    of the same name. Without this, subagents would keep the full default
+    toolset, including `delete`.
+    """
+    return FilesystemMiddleware(backend=backend, tools=FS_TOOLS, _permissions=permissions)
+
+
 async def build_tools() -> tuple[list[BaseTool], list[BaseTool]]:
     """Return (orchestrator tools, read-only LinkedIn tools)."""
     from .tools.linkedin_mcp import build_linkedin_tools
@@ -82,11 +108,21 @@ async def build_tools() -> tuple[list[BaseTool], list[BaseTool]]:
     return orchestrator, linkedin
 
 
-def build_subagents(linkedin: list[BaseTool], tavily: list[BaseTool]) -> list[Any]:
+def build_subagents(
+    linkedin: list[BaseTool],
+    tavily: list[BaseTool],
+    *,
+    backend: FilesystemBackend,
+    permissions: list[FilesystemPermission],
+) -> list[Any]:
     """Subagents with isolated context.
 
     Each returns only its conclusion upstream: full vacancy descriptions and long
     skill texts stay inside and never reach the main conversation.
+
+    `backend` and `permissions` are threaded in so every subagent gets the same
+    restricted filesystem middleware as the orchestrator instead of the
+    unrestricted one the harness would otherwise build for it.
     """
     settings = get_settings()
     return [
@@ -97,8 +133,10 @@ def build_subagents(linkedin: list[BaseTool], tavily: list[BaseTool]) -> list[An
                 "requirements, hidden signals and a conclusion. Call it per vacancy."
             ),
             "system_prompt": JOB_ANALYST_PROMPT,
-            "tools": [*linkedin, *tavily],
+            "tools": [read_job_dossier, *linkedin, *tavily],
             "model": settings.scout_model_fast,
+            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "permissions": permissions,
         },
         {
             "name": "cv-writer",
@@ -107,9 +145,14 @@ def build_subagents(linkedin: list[BaseTool], tavily: list[BaseTool]) -> list[An
                 "Pass it the vacancy id and what you need produced."
             ),
             "system_prompt": CV_WRITER_PROMPT,
-            "tools": [render_pdf],
+            # The profile tool goes to cv-writer alone: it is the only subagent
+            # whose prompt forbids writing anything the profile does not contain,
+            # and it was the only one with no way to check.
+            "tools": [read_job_dossier, read_candidate_profile, render_pdf],
             "skills": CV_SKILLS,
             "model": settings.scout_model_smart,
+            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "permissions": permissions,
         },
         {
             "name": "company-researcher",
@@ -124,6 +167,8 @@ def build_subagents(linkedin: list[BaseTool], tavily: list[BaseTool]) -> list[An
                 ],
             ],
             "model": settings.scout_model_fast,
+            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "permissions": permissions,
         },
     ]
 
@@ -151,15 +196,13 @@ async def build_agent(
             logger.info("Taxonomy unavailable (%s); prompt built without it", exc)
 
     backend = FilesystemBackend(root_dir=str(REPO_ROOT), virtual_mode=False)
-    private_deny = [
-        FilesystemPermission(operations=["read", "write"], paths=PRIVATE_PATHS, mode="deny")
-    ]
+    private_deny = build_private_deny()
 
     middleware: list[Any] = [
         TodoListMiddleware(),
         # A custom FilesystemMiddleware instead of the built-in one is the only
         # way to withhold `execute` from the agent.
-        FilesystemMiddleware(backend=backend, tools=FS_TOOLS, _permissions=private_deny),
+        build_filesystem_middleware(backend, private_deny),
         LinkedInBudgetMiddleware(config.budgets),
         InjectionGuardMiddleware(),
         *build_pii_middleware(),
@@ -176,7 +219,7 @@ async def build_agent(
         model=settings.scout_model_smart,
         system_prompt=build_system_prompt(taxonomy, config),
         tools=orchestrator_tools,
-        subagents=build_subagents(linkedin, tavily),
+        subagents=build_subagents(linkedin, tavily, backend=backend, permissions=private_deny),
         middleware=middleware,
         backend=backend,
         permissions=private_deny,

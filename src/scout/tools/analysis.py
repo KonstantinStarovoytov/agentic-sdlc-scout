@@ -15,7 +15,7 @@ from langgraph.store.base import BaseStore
 
 from ..config import get_config, get_settings
 from ..memory import jobs_ns, load_feedback, profile_ns, save_feedback
-from ..schemas import CandidateProfile, JobPosting
+from ..schemas import CandidateProfile, JobPosting, RequirementKind
 from ..scoring import aggregate_gaps, score_job
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,163 @@ async def _load_jobs(store: BaseStore, user_id: str, job_ids: list[str] | None) 
         except Exception as exc:
             logger.debug("Skipping unreadable stored vacancy %s: %s", item.key, exc)
     return jobs
+
+
+def _format_dossier(job: JobPosting) -> str:
+    """Render a stored dossier for a subagent, description last and marked untrusted."""
+    from ..middleware.injection_guard import wrap_untrusted
+
+    must_have = [r for r in job.requirements if r.kind is RequirementKind.MUST_HAVE]
+    nice_to_have = [r for r in job.requirements if r.kind is RequirementKind.NICE_TO_HAVE]
+    visa = "not stated" if job.visa_sponsorship is None else str(job.visa_sponsorship)
+
+    lines = [
+        f"# {job.title} - {job.company}",
+        f"id: {job.canonical_id}",
+        f"location: {job.location or 'not stated'} | work mode: {job.work_mode.value}"
+        f" | seniority: {job.seniority.value}",
+        f"posted: {job.posted_at or 'not stated'} | source: {job.source}",
+        f"url: {job.url or 'not stated'}",
+        f"salary: {job.salary_raw or 'not stated'}"
+        f" | visa sponsorship: {visa}"
+        f" | language: {job.language or 'not stated'}",
+    ]
+    if must_have:
+        lines.append("must have: " + ", ".join(r.skill for r in must_have))
+    if nice_to_have:
+        lines.append("nice to have: " + ", ".join(r.skill for r in nice_to_have))
+    if job.tech_stack:
+        lines.append("tech stack: " + ", ".join(job.tech_stack))
+
+    if job.description:
+        lines.append("\n## Description\n" + wrap_untrusted(job.description))
+    else:
+        lines.append("\nNo full description was stored: only the card survived the scan.")
+
+    return "\n".join(lines)
+
+
+@tool
+async def read_job_dossier(job_id: str) -> str:
+    """Read one stored job dossier by its canonical id.
+
+    Read-only and scoped to the vacancies namespace: nothing else in memory is
+    reachable through it. Meant for subagents working on a single vacancy, so
+    the full description is digested in an isolated context instead of being
+    pulled into the main conversation.
+
+    Args:
+        job_id: the canonical vacancy id, e.g. `li:4123456789`.
+
+    Returns:
+        The dossier as text, with the raw description marked as untrusted data.
+    """
+    settings = get_settings()
+    store = _store()
+    if store is None:
+        return "Memory is unavailable; the dossier cannot be read."
+
+    item = await store.aget(jobs_ns(settings.scout_user_id), job_id)
+    if item is None:
+        return (
+            f"No vacancy {job_id} in memory. Check the id, or ask the orchestrator "
+            "to run research_jobs first."
+        )
+    try:
+        job = JobPosting.model_validate(item.value)
+    except Exception as exc:
+        logger.warning("Stored vacancy %s is corrupt: %s", job_id, exc)
+        return f"The stored record for {job_id} is unreadable."
+
+    return _format_dossier(job)
+
+
+def _format_profile(profile: CandidateProfile) -> str:
+    """Render the stored Candidate Profile for a subagent, evidence quoted verbatim.
+
+    Deliberately not wrapped in the untrusted-data markers, unlike a job dossier.
+    This is the owner's own data and the authority the CV is written against; the
+    marker's own text tells the model that anything inside it is hostile and must
+    not be acted on, which is the opposite of what the iron rule in the cv-writer
+    prompt requires. Marking everything untrusted also costs the marker its
+    meaning on the content that genuinely is.
+
+    The residual risk is accepted knowingly: `evidence` holds verbatim lines from
+    the CV, LinkedIn and personal site, so hostile text there would come through.
+    Those are the owner's own documents, and they were already digested once by
+    the tool-less structured-output call in `bootstrap_profile`, which is where
+    the architectural defence sits.
+    """
+    lines = [
+        "# Candidate Profile",
+        f"name: {profile.full_name or '[not stated]'}",
+        f"headline: {profile.headline or 'not stated'}",
+        f"location: {profile.location or 'not stated'}",
+        f"experience: {profile.years_experience:g} years"
+        if profile.years_experience is not None
+        else "experience: not stated",
+        f"right to work: {profile.work_authorization or 'not stated'}",
+        f"languages: {', '.join(profile.languages) if profile.languages else 'not stated'}",
+    ]
+    if profile.open_to_relocation is not None:
+        lines.append(f"open to relocation: {profile.open_to_relocation}")
+    if profile.salary_expectation:
+        lines.append(f"salary expectation: {profile.salary_expectation}")
+
+    if profile.roles:
+        lines.append("\n## Roles\n" + "\n".join(f"- {role}" for role in profile.roles))
+    if profile.projects:
+        lines.append("\n## Projects\n" + "\n".join(f"- {project}" for project in profile.projects))
+
+    if profile.claims:
+        claims = []
+        for claim in profile.claims:
+            years = f", {claim.years:g} years" if claim.years is not None else ""
+            last_used = f", last used {claim.last_used}" if claim.last_used else ""
+            claims.append(
+                f'- {claim.skill} (source: {claim.source}{years}{last_used}): "{claim.evidence}"'
+            )
+        lines.append("\n## Skills, each with the line that backs it\n" + "\n".join(claims))
+    else:
+        lines.append("\nNo skills are backed by evidence: the profile is empty in that respect.")
+
+    lines.append(
+        "\nAnything absent from the above is absent from the document. Write [placeholder] "
+        "and say what is needed rather than filling the hole."
+    )
+    return "\n".join(lines)
+
+
+@tool
+async def read_candidate_profile() -> str:
+    """Read the stored Candidate Profile: the only permitted source of facts about the user.
+
+    Read-only and scoped to the profile namespace: nothing else in memory is
+    reachable through it. Every skill comes with the verbatim line that backs it,
+    which is what a CV claim has to be built on — a skill without a quote here
+    cannot go into the document.
+
+    Returns:
+        The profile as text, or an explanation of why there is none to read.
+    """
+    settings = get_settings()
+    store = _store()
+    if store is None:
+        return "Memory is unavailable; the Candidate Profile cannot be read."
+
+    item = await store.aget(profile_ns(settings.scout_user_id), "current")
+    if item is None:
+        return (
+            "The Candidate Profile has not been assembled, so there is nothing to write from. "
+            "Ask the orchestrator to run bootstrap_profile first."
+        )
+    try:
+        profile = CandidateProfile.model_validate(item.value)
+    except Exception as exc:
+        logger.warning("Stored profile is corrupt: %s", exc)
+        return "The stored Candidate Profile is unreadable; it has to be rebuilt."
+
+    return _format_profile(profile)
 
 
 @tool
