@@ -61,6 +61,29 @@ class TestCredentialsReachTheClient:
         assert chat_model("openai:gpt-4.1-mini", temperature=0).temperature == 0
 
 
+class TestOpenAIUsesTheResponsesAPI:
+    """Chat Completions refuses function tools from a reasoning model.
+
+    gpt-5.6-luna answered an ordinary research turn with a 400 naming the fix:
+    "use /v1/responses or set reasoning_effort to 'none'". Reasoning is why the
+    model was chosen, so the endpoint is what changes, for every OpenAI model.
+    """
+
+    def test_openai_models_are_built_on_the_responses_api(self, monkeypatch):
+        monkeypatch.setattr(models, "get_settings", lambda: _settings(SETTINGS_KEY))
+
+        for name in ("openai:gpt-5.6-luna", "openai:gpt-5.4-nano", "openai:gpt-4.1-mini"):
+            assert chat_model(name).use_responses_api is True, name
+
+    def test_a_caller_may_still_override_it(self, monkeypatch):
+        monkeypatch.setattr(models, "get_settings", lambda: _settings(SETTINGS_KEY))
+
+        assert chat_model("openai:gpt-4.1-mini", use_responses_api=False).use_responses_api is False
+
+    def test_other_providers_get_no_openai_settings(self):
+        assert models._provider_defaults("anthropic:claude-x") == {}
+
+
 class TestEmbeddings:
     def test_the_key_comes_from_settings_not_the_environment(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)

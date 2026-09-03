@@ -46,7 +46,25 @@ def chat_model(name: str, **kwargs: Any) -> BaseChatModel:
             assembly time, rather than leaving the provider to fail on the first
             call somewhere deep inside a run.
     """
-    return init_chat_model(name, api_key=_require_key(), **kwargs)
+    return init_chat_model(name, api_key=_require_key(), **{**_provider_defaults(name), **kwargs})
+
+
+def _provider_defaults(name: str) -> dict[str, Any]:
+    """Per-provider settings every model needs and no call site should have to know.
+
+    OpenAI: the Responses API rather than Chat Completions. The newer models
+    reason by default, and Chat Completions refuses function tools from a
+    reasoning model — gpt-5.6-luna answered a plain research turn with a 400
+    that named the fix: "use /v1/responses or set reasoning_effort to 'none'".
+    Turning reasoning off would defeat the point of choosing the model, so the
+    endpoint changes instead. Tool calls, streaming and structured output were
+    checked under it for the nano, mini and luna models before this was set.
+    Message content arrives as blocks rather than a string; the server's text
+    extraction already handles both.
+    """
+    if name.startswith("openai:"):
+        return {"use_responses_api": True}
+    return {}
 
 
 def embeddings_model(name: str, **kwargs: Any) -> Embeddings:
