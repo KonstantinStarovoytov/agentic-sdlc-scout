@@ -14,7 +14,8 @@ import pytest
 
 from scout import models
 from scout.config import Settings
-from scout.models import MissingCredentialsError, chat_model
+from scout.memory import _index_config
+from scout.models import MissingCredentialsError, chat_model, embeddings_model
 
 SETTINGS_KEY = "sk-test-from-settings"
 
@@ -60,20 +61,55 @@ class TestCredentialsReachTheClient:
         assert chat_model("openai:gpt-4.1-mini", temperature=0).temperature == 0
 
 
+class TestEmbeddings:
+    def test_the_key_comes_from_settings_not_the_environment(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(models, "get_settings", lambda: _settings(SETTINGS_KEY))
+
+        model = embeddings_model("openai:text-embedding-3-small")
+        assert model.openai_api_key.get_secret_value() == SETTINGS_KEY
+
+    def test_no_key_is_refused(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(models, "get_settings", lambda: _settings(None))
+
+        with pytest.raises(MissingCredentialsError):
+            embeddings_model("openai:text-embedding-3-small")
+
+    def test_the_store_index_carries_a_built_model_not_a_name(self, monkeypatch):
+        """A name would be resolved inside the store, against the environment.
+
+        When that failed the store fell back to in-memory and the run continued
+        without persisting anything — a quiet way to lose every job dossier.
+        """
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(models, "get_settings", lambda: _settings(SETTINGS_KEY))
+
+        index = _index_config(_settings(SETTINGS_KEY))
+        assert index is not None
+        assert not isinstance(index["embed"], str)
+        assert index["embed"].openai_api_key.get_secret_value() == SETTINGS_KEY
+
+    def test_the_index_is_dropped_when_there_is_no_key(self):
+        """Semantic search is optional; persistence is not. Degrade, do not raise."""
+        assert _index_config(_settings(None)) is None
+
+
 class TestNoDirectModelConstruction:
-    def test_only_the_models_module_calls_init_chat_model(self):
+    @pytest.mark.parametrize("entry_point", ["init_chat_model", "init_embeddings"])
+    def test_only_the_models_module_builds_models(self, entry_point):
         """One place builds models, so one place can be sure about credentials.
 
-        A new `init_chat_model` call anywhere else would reintroduce the bug in a
-        form no unit test on the existing call sites would notice.
+        A new call anywhere else would reintroduce the bug in a form no unit test
+        on the existing call sites would notice.
         """
         source_root = Path(__file__).resolve().parents[1] / "src" / "scout"
         offenders = [
             path.relative_to(source_root).as_posix()
             for path in source_root.rglob("*.py")
-            if path.name != "models.py" and "init_chat_model" in path.read_text(encoding="utf-8")
+            if path.name != "models.py" and entry_point in path.read_text(encoding="utf-8")
         ]
         assert offenders == [], (
-            f"These modules build a chat model directly and would bypass the key "
-            f"from settings: {offenders}. Use scout.models.chat_model instead."
+            f"These modules call {entry_point} directly and would bypass the key "
+            f"from settings: {offenders}. Use scout.models instead."
         )

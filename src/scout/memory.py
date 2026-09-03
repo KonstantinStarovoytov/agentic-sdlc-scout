@@ -62,11 +62,19 @@ def feedback_ns(user_id: str) -> tuple[str, ...]:
 
 
 def _index_config(settings: Settings) -> Any | None:
-    """Enable semantic search only when an OpenAI key is present."""
+    """Enable semantic search only when an OpenAI key is present.
+
+    The model is built here rather than named. Passing the name would leave the
+    store to resolve it, and that resolution reads the environment — so a key
+    held only in `.env` would fail, the store would fall back to in-memory, and
+    the run would continue without persisting anything.
+    """
     if not settings.openai_api_key:
         logger.info("OPENAI_API_KEY is not set: memory runs without semantic search")
         return None
-    return {"dims": EMBEDDING_DIMS, "embed": EMBEDDING_MODEL, "fields": ["$"]}
+    from .models import embeddings_model
+
+    return {"dims": EMBEDDING_DIMS, "embed": embeddings_model(EMBEDDING_MODEL), "fields": ["$"]}
 
 
 # Neon takes seconds to wake, so the timeouts are well above the defaults.
