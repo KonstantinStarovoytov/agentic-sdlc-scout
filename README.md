@@ -69,6 +69,15 @@ everything on restart.
 
 Put your CV at `data/private/cv.pdf` (PDF, DOCX, MD or TXT all work).
 
+The LinkedIn MCP server is optional and needs two things beyond
+`SCOUT_LINKEDIN_MCP_COMMAND`. Authenticate once with
+`mcp-server-linkedin --login` while signed in to the burner account — there is
+no cookie to paste, the session is a browser profile under `~/.linkedin-mcp/`.
+And include `--no-auto-import` in the command: without it the server adopts the
+LinkedIn session of any locally signed-in Chromium browser, which is your real
+profile, so the agent refuses to start it. Skipping all of this is fine; the
+agent then runs on the guest endpoint and Tavily and says so in its answers.
+
 ## Usage
 
 ```bash
