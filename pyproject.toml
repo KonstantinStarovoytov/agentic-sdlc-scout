@@ -25,9 +25,17 @@ dependencies = [
 
 [project.scripts]
 scout = "scout.main:main"
+scout-serve = "scout.server:main"
 
 [project.optional-dependencies]
+# Only the HTTP shim needs these; the CLI and the graph do not.
+serve = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
 dev = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",

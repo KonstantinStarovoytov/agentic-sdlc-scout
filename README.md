@@ -49,6 +49,9 @@ These are structural properties, not prompt instructions:
 - **PII stays local.** Email and phone are redacted before any model call and
   live in `data/private/`, which the agent's filesystem tools cannot reach. They
   are substituted into the document at render time.
+- **Secrets are unreadable.** `.env` and `.git` are denied to the filesystem
+  tools. The agent reads hostile text for a living, so a description that talks
+  it into opening `.env` has to fail on a rule rather than on good judgement.
 - **Budgets.** Per-run and per-hour LinkedIn call limits, token and tool-call
   ceilings. Exceeding one returns a refusal the agent can work around, not a crash.
 
@@ -90,6 +93,47 @@ Start with `bootstrap_profile` — until the Candidate Profile exists, the agent
 refuses to score, because a score without a profile would be invention.
 
 Inspect the graphs locally with `uv run langgraph dev`.
+
+## Chat interface
+
+The agent also answers over an OpenAI-compatible endpoint, so any client that
+already talks to OpenAI can talk to it. Generate a token with
+`openssl rand -hex 32`, put it in `.env` as `SCOUT_OWNER_TOKEN`, and:
+
+```bash
+docker compose up --build     # agent on :8080, OpenWebUI on :3000
+```
+
+Then open <http://localhost:3000>; the chat UI is already pointed at the agent.
+To run the endpoint alone, without the UI, use `uv run scout-serve`.
+
+```
+POST /v1/chat/completions   streaming and not, Bearer token required
+GET  /v1/models
+GET  /health
+```
+
+The endpoint is stateless: an OpenAI client resends the whole conversation each
+turn, so there is no thread to keep. Memory that does persist — job dossiers,
+your profile — is keyed by the caller, not by the process.
+
+There is no LinkedIn account in the container. The session it needs is a browser
+profile on your machine, and shipping one into an image would bake a credential
+into it, so the container runs on the open listing and web search and says so.
+For full LinkedIn access, run the CLI locally.
+
+### Public mode
+
+`SCOUT_GUEST_ENABLED=true` opens a second, restricted agent for a widget on a
+public page. A guest gets no LinkedIn account, no access to your Candidate
+Profile or contacts, no CV writing, no write access to anything, and a request
+budget from `config/search.yaml`. None of that is asked of the model in a
+prompt: the tools are absent from the guest agent, so there is nothing for a
+clever request to talk it into.
+
+Treat `SCOUT_GUEST_TOKEN` as a gate, not a secret — it travels inside a public
+page and anyone can read it. What protects you is the missing capabilities and
+the rate limit behind it.
 
 ## Configuration
 

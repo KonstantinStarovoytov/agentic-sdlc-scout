@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     scout_linkedin_profile_url: str | None = None
     scout_personal_site_url: str | None = None
 
+    # --- HTTP shim (phases 2 and 3) ---
+    scout_host: str = "0.0.0.0"  # noqa: S104 — it is a container; the port binding is the boundary
+    scout_port: int = 8080
+
+    # The token an OpenAI-compatible client presents for full access. Without it
+    # the shim authenticates nobody and answers 503: an agent that can read the
+    # owner's CV must not fall back to open access because a variable is unset.
+    scout_owner_token: str | None = None
+
+    # Guest access is the widget on the personal page. Off unless asked for, and
+    # its token is not a secret — it travels inside a public page — so it gates
+    # casual traffic while the capability restrictions do the real work.
+    scout_guest_enabled: bool = False
+    scout_guest_token: str | None = None
+
     # Declared so a run can say whether it is being traced. The LangSmith SDK
     # reads these from the environment rather than from here, which is what
     # `load_env_file` exists to guarantee.
@@ -132,6 +147,12 @@ class BudgetsConfig(BaseModel):
     max_tokens_per_run: int = 400_000
     max_tool_calls_per_run: int = 120
     tavily_calls_per_run: int = 20
+
+    # What one visitor to the public page may spend. A full research run costs
+    # roughly 50k input tokens, so these ceilings are about the monthly bill
+    # rather than about politeness.
+    guest_requests_per_hour: int = 10
+    guest_requests_per_day: int = 40
 
 
 class ScoringWeights(BaseModel):

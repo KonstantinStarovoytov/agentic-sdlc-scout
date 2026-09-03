@@ -50,6 +50,10 @@ budgets:
 
   tavily_calls_per_run: 20
 
+  # Per visitor of the public page, enforced by the HTTP shim
+  guest_requests_per_hour: 10
+  guest_requests_per_day: 40
+
 scoring:
   # Weights of the four rubric components, summing to 100
   weights:

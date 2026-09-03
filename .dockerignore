@@ -1,0 +1,26 @@
+# The build context is the repository, and the repository holds every secret in
+# the project. Copying is selective in the Dockerfile, but a mistake there would
+# be silent; this makes the files unavailable to copy in the first place.
+.env
+.env.*
+!.env.example
+.git
+.github
+data/private
+out
+*.pdf
+*.docx
+
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.tox
+
+docs
+tests
+.neon
+.agents
+skills-lock.json

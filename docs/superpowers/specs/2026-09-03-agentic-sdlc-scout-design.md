@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-03
 **Status:** approved, ready for an implementation plan
-**Phase:** 1 of 3 (agent core; deployment and chat interfaces are separate phases)
+**Phase:** 3 of 3 (agent core, HTTP shim and the public read-only mode are all implemented)
 
 ### Implementation status
 
@@ -10,6 +10,10 @@ Reconciled against the implemented code on 2026-09-03. Everything described here
 actually does, unless the section carries a bold **Not implemented in phase 1.** line directly under
 its heading. That marker means the reasoning still stands and the section is kept as the plan, but
 nothing in it exists yet — do not go looking for it in `src/`.
+
+Phases 2 and 3 landed together, because phase 3 turned out to be phase 2 plus a second identity
+rather than a separate piece of work. §13 records what was built and the two defects the work
+uncovered in phase 1.
 
 ## 1. The problem
 
@@ -23,8 +27,9 @@ do not have it".
 
 ### Not in scope for phase 1
 
-- Container deployment and an OpenAI-compatible shim for OpenWebUI (phase 2)
-- A chat widget on the user's personal page (phase 3)
+- ~~Container deployment and an OpenAI-compatible shim for OpenWebUI (phase 2)~~ — built, see §13
+- ~~A chat widget on the user's personal page (phase 3)~~ — the read-only agent behind it is built,
+  see §13; the page-side markup is the user's own site and lives outside this repository
 - Background periodic scanning and notifications (architecturally provided for, switched on later)
 - Sending messages and connection requests on LinkedIn (deliberately excluded, see §5)
 
@@ -631,14 +636,60 @@ does against itself, which is why the assertions run against the prompt text and
 - **One end-to-end smoke test** against live LinkedIn under a separate pytest marker, not in CI. The
   `live` marker is declared in `pyproject.toml` and no test wears it yet.
 
-## 13. Groundwork for phases 2 and 3
+## 13. Phases 2 and 3: the HTTP shim and the public agent
 
-`langgraph.json` is laid down straight away: locally it gives Studio via `langgraph dev`, and for a
-later deployment it is the same graph in a container.
+`langgraph.json` was laid down in phase 1: locally it gives Studio via `langgraph dev`, and it is the
+same graph in a container.
 
-**Phase 2 (OpenWebUI):** a thin OpenAI-compatible `/v1/chat/completions` shim over `graph.astream`.
-The agent stays transport-independent.
+**The shim** (`server.py`) is an OpenAI-compatible `/v1/chat/completions` over `agent.astream`, plus
+`/v1/models` and `/health`. It authenticates the caller, picks one of two pre-built agents,
+translates messages in and tokens out, and does nothing else; every rule about what the agent may do
+stays in the agent.
 
-**Phase 3 (widget on the personal page):** the same shim, but with authentication mandatory and a
-separate read-only mode. Otherwise the very first visitor to the site gets access to the user's
-profile, their memory and the LinkedIn burner session.
+It is stateless, which is a consequence of the protocol rather than a shortcut: an OpenAI client
+resends the whole conversation each turn, so there is no thread to keep and no checkpointer to
+consult. Memory still persists, keyed by the caller.
+
+Two things are filtered out of the token stream. Subagents run under a nested checkpoint namespace
+and their working notes stay there, which is the entire point of the subagent design; and the
+summarisation model is tagged `langsmith:nostream`, because it writes a summary of the conversation
+rather than an answer and would otherwise be typed into the user's window the moment context crosses
+the trigger.
+
+**The guest agent** is the read-only one served to visitors of the personal page. The restriction is
+structural: `build_agent(guest=True)` withholds the LinkedIn tools, `bootstrap_profile`,
+`remember_preference`, the `cv-writer` subagent and every mutating filesystem tool. A capability the
+agent was never given cannot be talked into existence, which is the only guarantee worth having on a
+public endpoint; the prompt layer that describes the restriction exists so the model stops offering a
+CV it cannot write, not to enforce anything.
+
+`SCOUT_GUEST_TOKEN` is treated as a gate rather than a secret, because it ships inside a public page.
+The protections that matter are the missing capabilities and the per-visitor request budget.
+
+### Two phase-1 defects this work uncovered
+
+**Identity was a process constant.** Every call site read `settings.scout_user_id`, which is correct
+for one user at a terminal and catastrophic over HTTP: one namespace shared by every caller means the
+first visitor reads the owner's Candidate Profile. Identity now travels through the ambient LangGraph
+run context (`identity.py`), the same way the store does, and falls back to the configured user
+outside a run so the CLI and the tests are unchanged.
+
+**The filesystem backend is rooted at the repository, and the repository holds `.env`.** Only
+`data/private` was denied, leaving every key in the project one `read_file` away. The agent reads
+hostile text by design, so a vacancy description that talks it into opening `.env` and quoting the
+result was the whole attack. `.env`, `.env.*` and `.git` are now denied to both the owner and the
+guest.
+
+There is also one place where withholding a tool was not enough: `enrich_node` reaches LinkedIn
+directly rather than through the agent's toolset, so it carries its own guest check. Without it the
+public endpoint would drive the owner's burner account.
+
+### Still open
+
+The container has no LinkedIn session and is not meant to get one: the session is a browser profile
+under `~/.linkedin-mcp/`, and baking it into an image would put a credential in the image and drive a
+bannable account from a public endpoint. Deployed runs degrade to the open listing and Tavily, and
+say so. Full LinkedIn access is a local CLI run.
+
+The rate limiter is in-process, so it resets on restart and does not span replicas. For one container
+in front of one person's OpenAI balance that is enough; a second replica would need shared state.

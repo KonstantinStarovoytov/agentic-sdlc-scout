@@ -1,0 +1,45 @@
+# Phase 2: the agent behind an OpenAI-compatible endpoint, with OpenWebUI in
+# front of it. Both stay on the machine; nothing here is meant to face the
+# internet without the guest settings of phase 3 turned on deliberately.
+#
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# The chat UI is configured against the shim automatically. On first run
+# OpenWebUI asks for an account: it is local, and any e-mail will do.
+
+services:
+  scout:
+    build: .
+    # Keys and the database URL come from .env, which is never copied into the
+    # image. The container reads them as environment variables instead.
+    env_file:
+      - .env
+    environment:
+      SCOUT_HOST: 0.0.0.0
+      SCOUT_PORT: 8080
+      # LinkedIn needs a browser profile that exists only on the host.
+      SCOUT_LINKEDIN_MCP_COMMAND: ""
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    depends_on:
+      - scout
+    environment:
+      # The shim is the only model provider; Ollama would otherwise be probed
+      # on every start and log failures for a service that is not there.
+      OPENAI_API_BASE_URL: http://scout:8080/v1
+      OPENAI_API_KEY: ${SCOUT_OWNER_TOKEN:?set SCOUT_OWNER_TOKEN in .env}
+      ENABLE_OLLAMA_API: "false"
+      WEBUI_AUTH: "true"
+    ports:
+      - "3000:8080"
+    volumes:
+      - openwebui:/app/backend/data
+    restart: unless-stopped
+
+volumes:
+  openwebui:
