@@ -54,8 +54,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
 
-    scout_model_fast: str = "openai:gpt-4.1-mini"
-    scout_model_smart: str = "openai:gpt-4.1"
+    # Requirement extraction is the high-volume call: one per enriched posting, with
+    # the whole description in the prompt. It wants recall and structure, not thought.
+    # Reasoning models are actively wrong for it — measured on a real posting,
+    # gpt-5-nano spent 7040 reasoning tokens to return *fewer* requirements than
+    # gpt-5.4-nano returned with none.
+    scout_model_fast: str = "openai:gpt-5.4-nano"
+    scout_model_smart: str = "openai:gpt-5.4-mini"
 
     # Empty means an in-memory store: development is possible without Neon.
     scout_database_url: str | None = None
