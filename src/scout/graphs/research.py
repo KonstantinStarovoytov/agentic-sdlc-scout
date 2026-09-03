@@ -16,7 +16,6 @@ import logging
 from datetime import date, timedelta
 from typing import Annotated, Any
 
-from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
@@ -26,6 +25,7 @@ from typing_extensions import TypedDict
 from ..config import ScoutConfig, get_config, get_settings
 from ..memory import get_known_job_ids, jobs_ns
 from ..middleware.injection_guard import wrap_untrusted
+from ..models import chat_model
 from ..schemas import (
     ExtractedRequirements,
     JobCard,
@@ -268,7 +268,7 @@ async def extract_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]
             "notes": ["OPENAI_API_KEY is not set; requirements were not extracted."],
         }
 
-    model = init_chat_model(settings.scout_model_fast).with_structured_output(ExtractedRequirements)
+    model = chat_model(settings.scout_model_fast).with_structured_output(ExtractedRequirements)
 
     async def extract_one(job: JobPosting) -> JobPosting:
         if not job.description:

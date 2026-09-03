@@ -28,6 +28,7 @@ from .middleware.cost_guard import build_cost_middleware
 from .middleware.injection_guard import InjectionGuardMiddleware
 from .middleware.linkedin_budget import LinkedInBudgetMiddleware
 from .middleware.pii import build_pii_middleware
+from .models import chat_model
 from .prompts import (
     COMPANY_RESEARCHER_PROMPT,
     CV_WRITER_PROMPT,
@@ -134,7 +135,7 @@ def build_subagents(
             ),
             "system_prompt": JOB_ANALYST_PROMPT,
             "tools": [read_job_dossier, *linkedin, *tavily],
-            "model": settings.scout_model_fast,
+            "model": chat_model(settings.scout_model_fast),
             "middleware": [build_filesystem_middleware(backend, permissions)],
             "permissions": permissions,
         },
@@ -150,7 +151,7 @@ def build_subagents(
             # and it was the only one with no way to check.
             "tools": [read_job_dossier, read_candidate_profile, render_pdf],
             "skills": CV_SKILLS,
-            "model": settings.scout_model_smart,
+            "model": chat_model(settings.scout_model_smart),
             "middleware": [build_filesystem_middleware(backend, permissions)],
             "permissions": permissions,
         },
@@ -166,7 +167,7 @@ def build_subagents(
                     if t.name in {"get_company_profile", "get_company_employees"}
                 ],
             ],
-            "model": settings.scout_model_fast,
+            "model": chat_model(settings.scout_model_fast),
             "middleware": [build_filesystem_middleware(backend, permissions)],
             "permissions": permissions,
         },
@@ -208,7 +209,7 @@ async def build_agent(
         *build_pii_middleware(),
         *build_cost_middleware(config.budgets),
         SummarizationMiddleware(
-            model=settings.scout_model_fast,
+            model=chat_model(settings.scout_model_fast),
             trigger=("fraction", 0.75),
             keep=("messages", 20),
         ),
@@ -216,7 +217,7 @@ async def build_agent(
 
     return create_deep_agent(
         name="agentic-sdlc-scout",
-        model=settings.scout_model_smart,
+        model=chat_model(settings.scout_model_smart),
         system_prompt=build_system_prompt(taxonomy, config),
         tools=orchestrator_tools,
         subagents=build_subagents(linkedin, tavily, backend=backend, permissions=private_deny),

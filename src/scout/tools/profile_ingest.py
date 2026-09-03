@@ -15,11 +15,11 @@ import json
 import logging
 from pathlib import Path
 
-from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 
 from ..config import REPO_ROOT, get_config, get_settings
 from ..memory import save_profile
+from ..models import chat_model
 from ..schemas import CandidateProfile
 
 logger = logging.getLogger(__name__)
@@ -198,7 +198,7 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
         f"### Source: {name}\n{wrap_untrusted(text[:20000])}" for name, text in redacted.items()
     )
 
-    model = init_chat_model(settings.scout_model_smart).with_structured_output(CandidateProfile)
+    model = chat_model(settings.scout_model_smart).with_structured_output(CandidateProfile)
     profile: CandidateProfile = await model.ainvoke(  # type: ignore[assignment]
         [
             {"role": "system", "content": MERGE_PROMPT},
