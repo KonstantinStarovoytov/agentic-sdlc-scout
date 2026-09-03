@@ -14,6 +14,7 @@ API key, a database or the LinkedIn MCP process.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,13 +23,16 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from scout.config import Settings
 from scout.identity import Identity
 from scout.server import (
+    CHAT_ID_HEADER,
     GUEST_MODEL,
     OWNER_MODEL,
     RateLimiter,
     _is_user_facing,
+    _latest_turn,
     _to_langchain,
     app,
     registry,
+    thread_id,
 )
 
 OWNER_TOKEN = "owner-secret"
@@ -38,16 +42,24 @@ GUEST_TOKEN = "guest-public"
 class FakeAgent:
     """Stands in for a built agent, recording the config it was run with."""
 
-    def __init__(self, reply: str = "answer") -> None:
+    def __init__(self, reply: str = "answer", history: list | None = None) -> None:
         self.reply = reply
         self.configs: list[dict] = []
+        self.payloads: list[dict] = []
+        # What the checkpointer would hold for any thread; None means no thread.
+        self.history = history
+
+    async def aget_state(self, config):
+        return SimpleNamespace(values={"messages": self.history or []})
 
     async def ainvoke(self, payload, config=None):
         self.configs.append(config or {})
+        self.payloads.append(payload)
         return {"messages": [AIMessage(content=self.reply)]}
 
     async def astream(self, payload, config=None, stream_mode=None):
         self.configs.append(config or {})
+        self.payloads.append(payload)
         top = {"langgraph_node": "model", "checkpoint_ns": "model:abc"}
         nested = {"langgraph_node": "model", "checkpoint_ns": "task:1|model:2"}
         yield AIMessageChunk(content="Hello"), top
@@ -145,7 +157,9 @@ class TestIdentityRouting:
         configure(scout_user_id="owner")
         owner, _guest = agents
         post(client, OWNER_TOKEN)
-        assert owner.configs[0]["configurable"] == {"user_id": "owner", "is_guest": False}
+        configurable = owner.configs[0]["configurable"]
+        assert configurable["user_id"] == "owner"
+        assert configurable["is_guest"] is False
 
     def test_a_guest_is_not_shown_the_owner_model(self, client, configure, agents):
         configure(scout_guest_enabled=True, scout_guest_token=GUEST_TOKEN)
@@ -251,6 +265,84 @@ class TestHealth:
     def test_health_needs_no_token(self, client, configure, agents):
         configure()
         assert client.get("/health").status_code == 200
+
+
+CONVERSATION = [
+    {"role": "user", "content": "find Agentic SDLC jobs"},
+    {"role": "assistant", "content": "here is a table"},
+    {"role": "user", "content": "now analyse the first one"},
+]
+
+
+class TestConversationThreads:
+    """The agent must remember its own work between turns, not just its prose.
+
+    An OpenAI client resends the conversation's text every turn and nothing
+    else. Served statelessly the agent reran its research on turn two and handed
+    back the same table; the trace showed three input messages and no memory of
+    the tool results behind the first answer.
+    """
+
+    def test_thread_is_namespaced_by_identity(self):
+        owner = thread_id(Identity("owner"), "chat-1")
+        guest = thread_id(Identity("guest:9", is_guest=True), "chat-1")
+
+        assert owner == "owner:chat-1"
+        assert guest == "guest:9:chat-1"
+        assert owner != guest
+
+    def test_no_chat_id_means_a_fresh_thread_every_time(self):
+        first = thread_id(Identity("owner"), None)
+        second = thread_id(Identity("owner"), None)
+
+        assert first != second
+        assert first.startswith("owner:ephemeral:")
+
+    def test_latest_turn_is_what_follows_the_last_reply(self):
+        assert _latest_turn(CONVERSATION) == [CONVERSATION[-1]]
+
+    def test_latest_turn_of_a_first_message_is_the_whole_thing(self):
+        assert _latest_turn(CONVERSATION[:1]) == CONVERSATION[:1]
+
+    def test_known_thread_receives_only_the_new_turn(self, client, configure, agents):
+        configure()
+        owner, _ = agents
+        owner.history = [{"role": "user", "content": "earlier"}]
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": CONVERSATION},
+            headers={"Authorization": f"Bearer {OWNER_TOKEN}", CHAT_ID_HEADER: "chat-1"},
+        )
+
+        assert response.status_code == 200
+        assert owner.configs[-1]["configurable"]["thread_id"] == "owner:chat-1"
+        assert owner.payloads[-1]["messages"] == [CONVERSATION[-1]]
+
+    def test_unknown_thread_receives_the_full_history(self, client, configure, agents):
+        """A chat that predates the thread, or whose checkpoint is gone."""
+        configure()
+        owner, _ = agents
+        owner.history = None
+
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": CONVERSATION},
+            headers={"Authorization": f"Bearer {OWNER_TOKEN}", CHAT_ID_HEADER: "chat-2"},
+        )
+
+        assert owner.configs[-1]["configurable"]["thread_id"] == "owner:chat-2"
+        assert owner.payloads[-1]["messages"] == CONVERSATION
+
+    def test_without_the_header_the_full_history_goes_in(self, client, configure, agents):
+        configure()
+        owner, _ = agents
+        owner.history = [{"role": "user", "content": "unrelated"}]
+
+        post(client, OWNER_TOKEN, messages=CONVERSATION)
+
+        assert owner.payloads[-1]["messages"] == CONVERSATION
+        assert "ephemeral" in owner.configs[-1]["configurable"]["thread_id"]
 
 
 class TestIdentityCapabilities:

@@ -42,6 +42,11 @@ services:
       # on every start and log failures for a service that is not there.
       OPENAI_API_BASE_URL: http://scout:8080/v1
       OPENAI_API_KEY: ${SCOUT_OWNER_TOKEN:?set SCOUT_OWNER_TOKEN in .env}
+      # Tell the agent which chat a request belongs to. The OpenAI protocol
+      # resends the conversation's prose each turn but never the agent's tool
+      # calls and results, so without this the agent forgot its own work
+      # between turns and redid it. "0" is the connection index above.
+      OPENAI_API_CONFIGS: '{"0": {"headers": {"X-Scout-Chat-Id": "{{CHAT_ID}}"}}}'
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "true"
       # Most OpenWebUI settings are "persistent config": the environment seeds
