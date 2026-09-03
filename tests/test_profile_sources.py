@@ -106,6 +106,39 @@ class TestAttachedCVWins:
         assert "The CV that lives on disk" in capture_sources["cv"]
 
 
+class TestContactsAreASideEffect:
+    """A contacts file that cannot be written must not take the run down with it.
+
+    In the container `data/private` was mounted read-only, and the write raised
+    an OSError after every source had been read and the model call paid for.
+    """
+
+    def test_unwritable_location_is_reported_not_raised(self, monkeypatch, tmp_path):
+        from scout.tools import profile_ingest, render_pdf
+
+        blocked = tmp_path / "private"
+        blocked.mkdir()
+        blocked.chmod(0o500)
+        monkeypatch.setattr(render_pdf, "CONTACTS_PATH", blocked / "contacts.json")
+
+        try:
+            note = profile_ingest._store_contacts({"email": "a@b.c"})
+        finally:
+            blocked.chmod(0o700)
+
+        assert note is not None
+        assert "could not be saved" in note
+
+    def test_writable_location_returns_nothing(self, monkeypatch, tmp_path):
+        from scout.tools import profile_ingest, render_pdf
+
+        path = tmp_path / "private" / "contacts.json"
+        monkeypatch.setattr(render_pdf, "CONTACTS_PATH", path)
+
+        assert profile_ingest._store_contacts({"email": "a@b.c"}) is None
+        assert json.loads(path.read_text())["email"] == "a@b.c"
+
+
 @pytest.fixture
 def capture_sources(monkeypatch):
     """Run `bootstrap_profile` for real, but stop at the model call.

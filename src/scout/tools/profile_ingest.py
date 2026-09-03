@@ -79,11 +79,19 @@ def extract_text_from_file(path: Path | str) -> str:
     raise ValueError(f"Unsupported format: {suffix}. Expected PDF, DOCX, MD or TXT.")
 
 
-def _store_contacts(contacts: dict[str, str]) -> None:
+def _store_contacts(contacts: dict[str, str]) -> str | None:
     """Append discovered contacts to the private file without overwriting existing ones.
 
     The file lives in `data/private`, which the agent's filesystem tools cannot
     reach, and is read only when a PDF is rendered.
+
+    Returns:
+        None on success, or a one-line explanation when the file could not be
+        written. Saving contacts is a side effect of assembling the profile, not
+        the point of it: a directory mounted read-only once turned this write
+        into an unhandled OSError that killed the whole run after every source
+        had been read and paid for. The profile is still built; the caller
+        reports that the PDF renderer will have to ask for contacts instead.
     """
     from .render_pdf import CONTACTS_PATH
 
@@ -91,12 +99,20 @@ def _store_contacts(contacts: dict[str, str]) -> None:
     if CONTACTS_PATH.exists():
         try:
             existing = json.loads(CONTACTS_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError):
             existing = {}
 
     merged = {**contacts, **existing}
-    CONTACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONTACTS_PATH.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        CONTACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONTACTS_PATH.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not save contacts to %s: %s", CONTACTS_PATH, exc)
+        return (
+            f"Contacts were found but could not be saved ({exc.strerror or exc}); "
+            "they will be asked for when a PDF is rendered."
+        )
+    return None
 
 
 async def _fetch_site(url: str) -> str:
@@ -280,7 +296,9 @@ async def bootstrap_profile(cv_path: str | None = None, cv_text: str | None = No
             contacts.setdefault(key, value)
 
     if contacts:
-        _store_contacts(contacts)
+        note = _store_contacts(contacts)
+        if note:
+            problems.append(note)
 
     blocks = "\n\n".join(
         f"### Source: {name}\n{wrap_untrusted(text[:20000])}" for name, text in redacted.items()

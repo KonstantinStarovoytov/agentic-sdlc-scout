@@ -24,11 +24,13 @@ services:
       - "8080:8080"
     volumes:
       # The CV is deliberately absent from the image — it is personal data and
-      # images get pushed to registries. It is mounted instead, read-only, so
+      # images get pushed to registries. It is mounted instead, so
       # bootstrap_profile can build the Candidate Profile in a container too.
-      # The agent's own filesystem tools still cannot reach this path; only the
-      # ingest tool reads it, and contacts are redacted before any model call.
-      - ./data/private:/app/data/private:ro
+      # Writable, because the ingest tool saves the contacts it redacts here for
+      # the PDF renderer to pick up; a read-only mount turned that save into a
+      # crash. The agent's own filesystem tools still cannot reach this path:
+      # that is enforced by the deny rules in agent.py, not by the mount.
+      - ./data/private:/app/data/private
     restart: unless-stopped
 
   openwebui:
@@ -42,12 +44,30 @@ services:
       OPENAI_API_KEY: ${SCOUT_OWNER_TOKEN:?set SCOUT_OWNER_TOKEN in .env}
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "true"
+      # Most OpenWebUI settings are "persistent config": the environment seeds
+      # the value on first start, after which the copy in the database wins and
+      # changes here are silently ignored. That is how two settings below sat
+      # in this file for a day while the running instance kept the old values.
+      # With persistence off, this file is the configuration, every start.
+      ENABLE_PERSISTENT_CONFIG: "false"
       # Send an attached file whole instead of retrieving chunks of it. The
       # default runs the upload through OpenWebUI's own RAG and pastes back
       # whichever passages it judged relevant, which is reasonable for a long
       # report and wrong for a CV: the profile is built from a complete document
       # or it is built from holes.
       BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      # OpenWebUI runs housekeeping prompts after each turn — a chat title,
+      # follow-up suggestions, tags, search-query rewrites — against whatever
+      # model the chat uses. Here that model is the whole agent, so each turn
+      # was followed by two or three extra full runs, with the complete system
+      # prompt and every tool attached, to produce a title and some tags. There
+      # is no cheap model in this stack to route them to, so they are off.
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      ENABLE_IMAGE_PROMPT_GENERATION: "false"
     ports:
       - "3000:8080"
     volumes:
