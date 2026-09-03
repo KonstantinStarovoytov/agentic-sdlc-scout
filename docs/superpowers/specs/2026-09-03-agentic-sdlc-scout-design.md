@@ -32,8 +32,9 @@ do not have it".
 
 | Question | Decision | Reason |
 |---|---|---|
-| LinkedIn access | `stickerdaniel/linkedin-mcp-server` over MCP | The only route to structured LinkedIn data; gives `search_jobs`, `get_job_details`, `get_person_profile`, `get_company_profile` |
+| LinkedIn access | `stickerdaniel/linkedin-mcp-server` over MCP | The only route to structured LinkedIn data; gives `search_jobs`, `get_job_details`, `get_person_profile`, `get_company_profile`, `get_company_employees`, `search_people` |
 | LinkedIn account | A separate burner account | Under the hood it automates a real browser (Patchright Chromium); the risk of a ban must not touch the main profile |
+| LinkedIn authentication | A stored browser profile under `~/.linkedin-mcp/`, created by `mcp-server-linkedin --login` | Server 4.x accepts no `li_at` cookie by any route — not through the environment, not on the command line. There is therefore no cookie setting in `.env`, and nothing to rotate: the login is a one-off manual step in a terminal |
 | User profile | A combination: CV file + public LinkedIn + personal page, with gaps filled in by questions in chat | No single source is complete or current on its own |
 | Operating mode | On-demand from chat | Background scanning gets added later without a rewrite: the storage schema is already ready for it |
 | Storage | Postgres on the Neon free tier + pgvector | The same code locally and in production, semantic search over memory, no migration before deployment |
@@ -112,9 +113,11 @@ An ordinary `StateGraph`, exposed to the agent as a single tool. Five nodes:
    only within the call budget. The one and only place where we touch LinkedIn under the account at all.
 
    **The prefilter** is a cheap cull based on data we already have after `scan`, before spending a
-   request against LinkedIn: location mismatch against the config, seniority outside the given range,
-   a company or keywords on the stop-list from the `feedback` namespace, a vacancy older than the
-   freshness window.
+   request against LinkedIn: seniority outside the given range, a company or keywords on the
+   stop-list from the `feedback` namespace, a vacancy older than the freshness window. Location is
+   deliberately not among them — `scan` already queries one location at a time from the config, so
+   everything reaching the prefilter came from a market that was asked for. The geographic check that
+   does exist is the hard gate in §10, which runs after `extract` has resolved the work mode.
 4. **`extract`** — raw description → the `JobPosting` Pydantic schema. Structured output, not free
    text. **The node runs with no tools at all** — this is the architectural defence against injection (§5).
 5. **`persist`** — the full dossier goes into the Store, only a compact card is returned outwards.
@@ -127,9 +130,12 @@ when genuinely needed — for example, when tailoring a CV to a vacancy. The com
 with a reminder to hand a vacancy id to `job-analyst` rather than pull the description upwards.
 Without this rule the context burns out around the fifth vacancy.
 
-Note that the subagents are told to read the dossier from memory but are given no tool that reads the
-`jobs` namespace, so today they work from what the caller passes them. The rule above is the one that
-matters and it holds; the retrieval side of it is unfinished.
+The retrieval side of that rule is `read_job_dossier(job_id)` in `tools/analysis.py`: a read-only tool
+scoped to the `jobs` namespace and nothing else, handed to `job-analyst` and `cv-writer` and withheld
+from `company-researcher`, which is never given a vacancy id. It renders the stored dossier with the
+raw description last and wrapped in the untrusted-data markers (§5.2), and it answers a missing or
+corrupt record with an explanation rather than an exception. Without it the two subagents were told to
+read something from memory and had no way to reach it.
 
 ### 4.4 Collecting the Candidate Profile
 
@@ -151,6 +157,20 @@ command when the data needs refreshing:
 The result goes into the `profile` namespace. Every claim carries its source — this is needed because
 the scoring rubric requires evidence to be quoted (§10).
 
+Reading it back is `read_candidate_profile()`, the symmetrical counterpart of `read_job_dossier`: also
+in `tools/analysis.py`, also read-only, scoped to the `profile` namespace and nothing else. It goes to
+`cv-writer` alone, because that is the only subagent whose prompt forbids writing anything the profile
+does not contain, and until it existed that rule cited a document the subagent could not open.
+
+Unlike a dossier, the profile is **not** wrapped in the untrusted-data markers. It is the owner's own
+data and the authority the CV is written against, whereas the marker's own text instructs the model
+that everything inside is hostile and must not be acted on — the exact opposite of what `cv-writer`
+needs. Marking trusted content untrusted would also cost the marker its meaning on the content that
+genuinely is. The residual risk is accepted knowingly: `evidence` fields hold verbatim lines from the
+CV, LinkedIn and personal site, so hostile text there would come through, but those are the owner's
+own documents and they were already digested once by the tool-less structured-output call in
+`bootstrap_profile`, which is where the architectural defence sits.
+
 The file itself is read by Python inside the tool, not by the agent through its file tools:
 `data/private/**` is denied to those (§5.3). Email and phone found in the CV are stripped before the
 merge call and written to the private contacts file, so they reach the document only at render time
@@ -161,13 +181,25 @@ precisely why the redaction is done explicitly here rather than left to the PII 
 
 | Subagent | Purpose | Tools |
 |---|---|---|
-| `job-analyst` | Deep analysis of a single vacancy | Filesystem, LinkedIn MCP (read), Tavily |
-| `cv-writer` | Generating CVs and LinkedIn texts | Filesystem, `render_pdf`, the whole `skills/` directory |
-| `company-researcher` | Context on the company | Tavily, `get_company_profile`, `get_company_employees` |
+| `job-analyst` | Deep analysis of a single vacancy | Filesystem, `read_job_dossier`, LinkedIn MCP (read), Tavily |
+| `cv-writer` | Generating CVs and LinkedIn texts | Filesystem, `read_job_dossier`, `read_candidate_profile`, `render_pdf`, the whole `skills/` directory |
+| `company-researcher` | Context on the company | Filesystem, Tavily, `get_company_profile`, `get_company_employees` |
 
-Each works in an isolated context and returns only the result upwards. The filesystem tools come from
-the harness, which gives every subagent its own filesystem middleware; the `data/private` denial
-(§5.3) is inherited by all of them.
+Each works in an isolated context and returns only the result upwards.
+
+The filesystem tools do **not** come from the harness. Left alone, `SubAgentMiddleware` builds a fresh
+unrestricted `FilesystemMiddleware` for every subagent, which would hand back `delete` and `execute`
+the orchestrator had been denied. The supported way to override it is to put an instance of the same
+middleware into the subagent's own `middleware` list, where entries replace base-stack middleware of
+the same name, so `build_subagents` threads the backend and the permission rules through and builds
+one restricted instance per subagent. The `data/private` denial (§5.3) rides along on the same
+mechanism rather than being inherited.
+
+`general-purpose`, the subagent the harness adds by itself and which no spec of ours describes, is the
+case that made this worth testing end to end rather than by inspecting our own specs. The test spies
+on `create_sub_agent` to read the effective middleware of every compiled subagent — the compiled
+runnables are otherwise closed over inside the `task` tool and cannot be reached — and asserts that
+`delete` and `execute` are offered to none of them, `general-purpose` included.
 
 Skills are passed to subagents explicitly — they are not inherited from the parent. What `cv-writer`
 receives is the `skills/` directory as a whole rather than a hand-picked skill: the five skills
@@ -247,9 +279,14 @@ at all — see §10.
 
 ### 5.5 The limits of what the agent can do
 
-The agent is handed **only the read-only subset** of the LinkedIn MCP: `search_jobs`,
-`get_job_details`, `get_recommended_jobs`, `get_person_profile`, `get_company_profile`,
-`get_company_employees`, `search_people`.
+The agent is handed **only the read-only subset** of the LinkedIn MCP, six tools: `search_jobs`,
+`get_job_details`, `get_person_profile`, `get_company_profile`, `get_company_employees`,
+`search_people`.
+
+The recommended-jobs feed is not on that list because server 4.23.3 exposes no tool for it. This is a
+capability the agent does not have rather than one that was taken away, and `get_saved_jobs` is not a
+stand-in: it returns what the account explicitly saved, which is a different thing. An earlier draft
+of this document listed a `get_recommended_jobs` that never existed.
 
 `send_message` and `connect_with_person` **are not included in the toolset at all** — they are not
 hidden behind a confirmation, they are absent. An agent capable of writing to people on the user's
@@ -261,16 +298,35 @@ agent's hands by default and nobody notices. Anything not on the list is dropped
 capability has to be admitted deliberately. The forbidden names are also written down separately,
 purely so that a refusal is legible in logs and assertable in tests.
 
-The same reasoning governs the file tools. The agent's `FilesystemMiddleware` is built by hand with an
+The same reasoning governs the file tools. The `FilesystemMiddleware` is built by hand with an
 explicit list — `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` — rather than taken as the
 harness default, because that is the only way to withhold `execute`. Running arbitrary shell commands
 is needed for none of this agent's tasks, and the cost of one mistake is out of all proportion to the
 convenience. `delete` is left out on the same grounds.
 
+That applies to every subagent as well as to the orchestrator, and it does not happen by itself: each
+subagent is given its own instance of the restricted middleware (§4.5), because otherwise the harness
+builds it an unrestricted default and the withholding stops at the top level. Of the two, `delete` is
+the one the restriction actually buys today — `execute` is inert anyway with the current backend,
+which is a property of that backend rather than a decision we can rely on.
+
 ### 5.6 Secrets
 
 `pydantic-settings` + a `.env` that is in `.gitignore`. Only `.env.example` is in the repository.
 Keys never end up in `langgraph.json`.
+
+There is no LinkedIn secret among them. `SCOUT_LINKEDIN_MCP_COMMAND` is a launch command, not a
+credential; the session itself is the stored browser profile of §2, which lives outside the repository
+and is never read by this code.
+
+One launch flag is load-bearing for security rather than for behaviour. `--no-auto-import` is
+mandatory in that command and its absence is a hard refusal to start the server, because upstream
+defaults `AUTO_IMPORT_FROM_BROWSER` to on: without the flag the server scans every Chromium-family
+browser on the machine, decrypts the cookies of the most recent live LinkedIn session and adopts it —
+which on the owner's machine is the real profile the burner account exists to keep out of this. The
+environment variable is not a usable backstop, because the MCP stdio client forwards only `HOME`,
+`PATH`, `USER`, `SHELL`, `TERM` and `LOGNAME` to the child process. The command line is the only
+control there is.
 
 ## 6. Memory (Neon Postgres)
 
@@ -305,6 +361,12 @@ embeddings, and an unindexed store that works beats a configured store that refu
 consumes it all exist, and nothing fills them, because the mode that would is not built (§8). The
 prompt layer handles the empty case explicitly rather than pretending.
 
+`companies` and `artifacts` are emptier still — the namespace helpers exist in `memory.py` and nothing
+calls them, so company research is repeated whenever it is asked for and generated documents live in
+`out/` rather than in memory. The TTL on the company cache is part of the plan above, not of the code.
+Three unused namespaces is more scaffolding than a phase-1 design needs; they are kept because the
+cost is two functions and removing them would only mean writing them again.
+
 In phase 1 the system is single-user: `user_id` is a constant from the config. The namespaces are
 parameterised by it anyway, so that phase 3 (a widget on the site with several visitors) does not
 require reworking the storage schema.
@@ -323,7 +385,10 @@ day looks like a breakage.
 
 | Situation | Behaviour |
 |---|---|
-| The LinkedIn session has gone stale | Switch to the guest source + Tavily, with an honest note in the answer about the incompleteness of the data and an instruction to log in again |
+| The LinkedIn session has gone stale | Detected up front by the `--status` probe below; the tools are not attached at all, the run continues on the guest source + Tavily, and the note names re-login as the fix |
+| The launch command is missing `--no-auto-import` | Refuse to start the server (§5.6) and degrade to the guest source + Tavily, with a note saying which flag is missing and why |
+| The LinkedIn MCP server fails to start | Same degradation, with the start-up error carried into the note |
+| LinkedIn MCP is simply not configured | Same degradation, with a note that nothing in the run came from a LinkedIn account |
 | 429 from LinkedIn or the guest endpoint | Backoff, then switch source |
 | The LinkedIn call budget is exhausted | The tool returns a refusal, the agent carries on with other sources |
 | Neon cold start | Retry in the connection pool |
@@ -333,6 +398,43 @@ day looks like a breakage.
 | Tavily is unavailable | Work on LinkedIn data only, with a note |
 
 The general principle: **a partial result with an honest caveat beats a crash.**
+
+### The LinkedIn session health check
+
+The failure this guards against is the quiet one: `mcp-server-linkedin` registers and lists its entire
+toolset with no session whatsoever, so a dead login produces a full, healthy-looking toolset whose
+every call fails with an authentication error buried inside a tool result. The run then looks
+successful and collects nothing. The tool list is therefore no evidence at all about the session.
+
+So `build_linkedin_tools()` asks the server directly, before connecting, by running its `--status`
+subcommand as a one-shot subprocess. Ground truth from 4.23.3: `--status` writes to stdout, leaves
+stderr empty, exits 0 on `Session is valid (profile: …)` and exits 1 on `No valid source session found
+at …`, on `Session expired or invalid (profile: …)` and on a validation error. The exit code is the
+signal; the text is kept only so the reason is legible to the user. Anything other than a clean exit 0
+counts as unauthenticated — a probe that could not be run is not evidence of a working session.
+
+Three details are load-bearing:
+
+- **The probe follows the same browser profile as the server.** Only the flags that select one
+  (`--user-data-dir`, `--chrome-path`) are carried over from the launch command, and
+  `--no-auto-import` is re-applied because `--status` opens the browser too. A check against a
+  different profile answers a question nobody asked.
+- **It is bounded.** `--status` launches a headless browser when a stored profile exists, so it is not
+  instantaneous, and the timeout kills the child rather than merely cancelling the wait. A run must
+  not be able to stall on a session check.
+- **It runs once per process.** `build_linkedin_tools()` is called from the agent, from the research
+  subgraph and from profile ingestion; the verdict is cached behind a lock built lazily in whichever
+  event loop is running, because an `asyncio.Lock` binds to the loop it first blocks on and a
+  module-level one starts raising as soon as a second `asyncio.run` touches it.
+
+One case is optimistic by the server's own admission: on a foreign runtime it reports that the source
+cookie was not verified and still exits 0. That is a weaker guarantee than the rest, which is why tool
+results remain the backstop rather than the probe being treated as proof.
+
+Whatever the outcome, the degradation path is the same shape: an empty tool list, never an exception,
+plus a reason recorded in `linkedin_degradation_note()`. The `enrich` node reads that note and folds
+it into the run's user-facing limitations, so an expired login and an absent configuration read
+differently to the user — only one of them is something they can act on.
 
 ## 8. Skills research as a function of the agent
 
@@ -389,6 +491,18 @@ weighted score is computed. Fails it → the score is capped from above at `hard
 vacancy is honestly flagged, not pulled up to a pretty number. The gate only ever fires on facts that
 are actually known; an unknown is not a failure, because letting a vacancy through is more honest than
 rejecting it on a guess.
+
+**Being remote is not an unconditional pass on the location check.** It used to be, and that was
+wrong: a remote posting still carries the market it hires in, and "remote, but only within the United
+States" is a real reason the user cannot take the job. What remote buys now is the benefit of the
+doubt, and only when the stated location names no market the gate could check against — a short,
+deliberately unambitious list of strings like `remote`, `anywhere`, `worldwide`, `europe`, `eu`,
+`emea`. Anything more precise would need real geography, and a wrong guess here caps the score of a
+vacancy the user could actually take. A remote posting naming a country outside the configured ones
+fails the gate like any other, and the failure message names the work mode, because a capped remote
+vacancy is the case the user is most likely to want to argue with. A posting with no location at all
+is still let through, because `scan` queried one configured location at a time and a blank field is
+therefore missing data rather than evidence of the wrong market.
 
 Four weighted components, whose weights sum to 100:
 
@@ -449,16 +563,23 @@ agentic-sdlc-scout/
 │   │   ├── guest_jobs.py
 │   │   ├── tavily.py
 │   │   ├── profile_ingest.py # bootstrap_profile
-│   │   ├── analysis.py       # score_jobs, gap_analysis, remember_preference
+│   │   ├── analysis.py       # score_jobs, gap_analysis, remember_preference,
+│   │   │                     # read_job_dossier, read_candidate_profile
 │   │   └── render_pdf.py
 │   └── graphs/research.py    # the scan→dedupe→enrich→extract→persist subgraph
+├── scripts/check_ascii.py    # the English-only gate, run by pre-commit and CI
 └── tests/
     ├── fixtures/guest_jobs_sample.html
     ├── test_guest_jobs.py
+    ├── test_linkedin_mcp.py
+    ├── test_prefilter_modes.py
+    ├── test_profile_ingest_formats.py
+    ├── test_prompt_layers.py
     ├── test_render.py
     ├── test_research_graph.py
     ├── test_safety.py
-    └── test_scoring.py
+    ├── test_scoring.py
+    └── test_subagent_tools.py
 ```
 
 The skills are cut by topic rather than by consumer — there is no `cv-writing` skill, there are five
@@ -476,7 +597,7 @@ it is doing too much.
   exactly where the galling bugs will be.
 - **Recorded fixtures** where the input is markup we do not control.
 
-What that came out as, five files under `tests/`:
+What that came out as, nine files under `tests/`:
 
 | File | What it holds the line on |
 |---|---|
@@ -485,9 +606,20 @@ What that came out as, five files under `tests/`:
 | `test_scoring.py` | The deterministic rubric |
 | `test_safety.py` | The toolset boundaries, injection neutralisation, contact redaction and the `data/private` denial |
 | `test_render.py` | Markdown to Typst, and — where Typst is installed — reading the text back out of the built PDF |
+| `test_linkedin_mcp.py` | The `--status` probe and the command built from it: exit codes, a hanging child, a missing binary. Real subprocesses against stub shell scripts, no network and no LinkedIn session |
+| `test_subagent_tools.py` | What subagents can and cannot do: `delete` and `execute` withheld from all of them including `general-purpose`, the private-data denial surviving the hand-built middleware, and `read_job_dossier` / `read_candidate_profile` reaching exactly one namespace each |
+| `test_prefilter_modes.py` | Work modes end to end — config to `f_WT` on the guest search to the location gate — and the gate's refusal to treat remote as a blanket pass |
+| `test_prompt_layers.py` | That the prompt promises nothing the code cannot do: no `bootstrap_taxonomy`, no tool a subagent does not own, and a PII scope matching its own docstring |
+| `test_profile_ingest_formats.py` | Which CV formats are accepted, and that a rejected one says what would work instead of surfacing a library error |
 
 Only the guest HTML is recorded as a fixture; MCP and Tavily responses are not, because nothing in
 phase 1 tests their parsing — those tools are passed through to the model rather than interpreted.
+
+A recurring shape in the newer files is worth naming: several of them exist because the prompt, the
+document or the config promised something the code did not do — a subagent told to read from a
+namespace it could not reach, a `remote_modes` list loaded and dropped on the floor, a taxonomy mode
+advertised and never built. Those defects are invisible to a test suite that only checks what the code
+does against itself, which is why the assertions run against the prompt text and the tool wiring.
 
 ### Not yet written
 
