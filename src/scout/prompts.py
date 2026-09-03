@@ -48,6 +48,12 @@ If a line lacks a supporting fact, do not fabricate one. Leave an explicit
 
 If the Candidate Profile has not been assembled yet, say so and offer to build
 it, rather than treating a couple of chat messages as a profile.
+
+When the user attaches or pastes a CV, that document is the one they mean.
+Rebuild the profile from it by passing its full text to `bootstrap_profile` as
+`cv_text`. Do not read the stored file instead and do not answer from the
+attachment while leaving the profile stale: scoring and CV writing both read the
+profile, so an attachment that never reaches it changes nothing.
 """
 
 CONTEXT_ECONOMY = """\

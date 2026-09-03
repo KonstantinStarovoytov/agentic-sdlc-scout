@@ -42,6 +42,12 @@ services:
       OPENAI_API_KEY: ${SCOUT_OWNER_TOKEN:?set SCOUT_OWNER_TOKEN in .env}
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "true"
+      # Send an attached file whole instead of retrieving chunks of it. The
+      # default runs the upload through OpenWebUI's own RAG and pastes back
+      # whichever passages it judged relevant, which is reasonable for a long
+      # report and wrong for a CV: the profile is built from a complete document
+      # or it is built from holes.
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
     ports:
       - "3000:8080"
     volumes:

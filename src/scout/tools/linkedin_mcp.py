@@ -348,6 +348,53 @@ def job_description_from(raw: Any) -> str:
     return joined
 
 
+def profile_text_from(raw: Any) -> str:
+    """Pull a readable profile out of a `get_person_profile` result, or nothing.
+
+    The server reports a bad call by returning the validation error as ordinary
+    content rather than by raising, so a caller that stringifies the result gets
+    an error message shaped exactly like data. That is how a pydantic traceback
+    once ended up being offered to the model as the user's LinkedIn profile.
+    Returning an empty string for those cases lets the caller fall back instead.
+
+    Args:
+        raw: whatever the tool returned.
+
+    Returns:
+        The profile text, or an empty string when the result is an error or is
+        too thin to be a profile at all.
+    """
+    blocks = raw if isinstance(raw, list) else [raw]
+    texts = [text for text in (_block_text(block) for block in blocks) if text]
+    joined = "\n".join(texts) if texts else str(raw)
+
+    lowered = joined.lower()
+    failures = ("validation error", "missing_argument", "unexpected_keyword_argument")
+    if any(marker in lowered for marker in failures):
+        logger.info("get_person_profile refused the call: %s", joined[:200])
+        return ""
+
+    try:
+        document = json.loads(joined)
+    except (TypeError, ValueError):
+        return joined
+
+    if isinstance(document, dict):
+        if document.get("error"):
+            logger.info("get_person_profile returned an error: %s", document["error"])
+            return ""
+        sections = document.get("sections")
+        if isinstance(sections, dict):
+            parts = [
+                f"## {name}\n{value}"
+                for name, value in sections.items()
+                if isinstance(value, str) and value.strip()
+            ]
+            if parts:
+                return "\n\n".join(parts)
+    return joined
+
+
 def filter_read_only(tools: list[BaseTool]) -> list[BaseTool]:
     """Keep only allowlisted tools and report the rest loudly."""
     allowed: list[BaseTool] = []

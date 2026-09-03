@@ -113,28 +113,85 @@ async def _fetch_site(url: str) -> str:
         return ""
 
 
+async def _fetch_linkedin_via_tavily(url: str) -> str:
+    """Read what a public profile shows without signing in.
+
+    LinkedIn answers an anonymous request with HTTP 999 and an auth wall, but a
+    profile page is indexed, and Tavily returns the cached public view. What
+    comes back is real and partial: headline, current employer, location, the
+    About text, education, certifications and publications, while the Experience
+    section stays behind the wall and arrives as "N/A".
+
+    That is worth having anyway — certifications and education are exactly the
+    things a CV omits and a profile keeps — as long as nothing downstream
+    mistakes it for a full history. The model is told what is missing.
+    """
+    from .tavily import build_tavily_tools
+
+    tools = {tool.name: tool for tool in build_tavily_tools()}
+    extract = tools.get("web_extract")
+    if extract is None:
+        return ""
+    try:
+        result = await extract.ainvoke({"urls": [url]})
+    except Exception as exc:
+        logger.info("Tavily could not read the LinkedIn profile: %s", exc)
+        return ""
+
+    entries = result.get("results", []) if isinstance(result, dict) else []
+    content = (entries[0].get("raw_content") or "") if entries else ""
+    if not content.strip():
+        return ""
+    return (
+        "Public LinkedIn view, read without signing in. The Experience section is "
+        "not visible to anonymous readers and is absent here; treat its absence as "
+        "unknown rather than as an empty career.\n\n" + content
+    )
+
+
 async def _fetch_linkedin(url: str) -> str:
-    """Read the user's public profile.
+    """Read the user's public profile, through the account if there is one.
 
     Deliberately reads someone else's public profile: under the burner account
     `get_my_profile` returns a blank, because that is a different person.
     """
-    from .linkedin_mcp import build_linkedin_tools, linkedin_degradation_note
+    from .linkedin_mcp import build_linkedin_tools, linkedin_degradation_note, profile_text_from
 
     tools = await build_linkedin_tools()
     person = next((t for t in tools if t.name == "get_person_profile"), None)
     if person is None:
-        logger.warning("%s", linkedin_degradation_note() or "LinkedIn MCP is not connected.")
-        return ""
+        logger.info(
+            "%s Falling back to the anonymous public view.",
+            linkedin_degradation_note() or "LinkedIn MCP is not connected.",
+        )
+        return await _fetch_linkedin_via_tavily(url)
+
     try:
-        return str(await person.ainvoke({"linkedin_url": url}))
+        # The argument is `linkedin_username`, and a full URL is accepted in its
+        # place. It used to be passed as `linkedin_url`, which the server
+        # rejected — and rejected softly, returning the validation error as
+        # ordinary content instead of raising, so the error text was handed on as
+        # if it were the profile. The sections have to be asked for by name; the
+        # bare profile page carries none of what a CV is built from.
+        raw = await person.ainvoke(
+            {
+                "linkedin_username": url,
+                "sections": "experience,education,certifications,skills,projects,languages",
+            }
+        )
     except Exception as exc:
-        logger.info("Could not read the LinkedIn profile: %s", exc)
-        return ""
+        logger.info("Could not read the LinkedIn profile through the account: %s", exc)
+        return await _fetch_linkedin_via_tavily(url)
+
+    text = profile_text_from(raw)
+    if not text:
+        logger.info("The account read returned nothing usable; using the anonymous view.")
+        return await _fetch_linkedin_via_tavily(url)
+    return text
 
 
 @tool
-async def bootstrap_profile(cv_path: str | None = None) -> str:
+async def bootstrap_profile(cv_path: str | None = None, cv_text: str | None = None) -> str:
     """Assemble the Candidate Profile from the CV, public LinkedIn and personal site.
 
     Runs once on first use, and again on request when the data changes. The
@@ -145,6 +202,12 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
         cv_path: path to the CV file. Leave it empty unless the user gave an
             explicit path — the configured default is already correct, and a
             guessed one silently reports the CV as unreadable.
+        cv_text: the CV as text, when the user has attached or pasted it into
+            this conversation. Use it in that case: an attachment is the
+            document the user means right now, while the stored file may be a
+            year old and nothing in it would say so. Pass the whole document,
+            not a summary of it — the profile records verbatim evidence, and a
+            paraphrase cannot back a claim.
 
     Returns:
         A short report on what was read, what is missing, and what to ask the user.
@@ -165,10 +228,17 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
     problems: list[str] = []
 
     resolved = Path(cv_path) if cv_path else REPO_ROOT / config.profile.cv_path
-    try:
-        sources["cv"] = extract_text_from_file(resolved)
-    except (FileNotFoundError, ValueError) as exc:
-        problems.append(f"CV: {exc}")
+    if cv_text and cv_text.strip():
+        # Text supplied in the conversation wins over the stored file. The user
+        # attaching a CV is stating which document they mean, and silently
+        # rebuilding the profile from an older file on disk would produce a
+        # confident answer about the wrong career.
+        sources["cv"] = cv_text
+    else:
+        try:
+            sources["cv"] = extract_text_from_file(resolved)
+        except (FileNotFoundError, ValueError) as exc:
+            problems.append(f"CV: {exc}")
 
     if settings.scout_linkedin_profile_url:
         text = await _fetch_linkedin(settings.scout_linkedin_profile_url)
