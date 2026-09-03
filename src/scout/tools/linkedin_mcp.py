@@ -179,6 +179,35 @@ def build_status_command(parts: list[str]) -> list[str]:
     return command
 
 
+# The markers the server puts on the line that actually states the verdict.
+_VERDICT_MARKERS = ("❌", "✅", "⚠️", "ℹ️")
+
+
+def _verdict_line(output: str, returncode: int | None) -> str:
+    """Pull the verdict out of `--status` output.
+
+    Taking the first line only works when no profile exists. Once one does, the
+    command prints a header first — runtime, login generation, profile mode —
+    and the first line names the runtime rather than the reason. That is exactly
+    the expired-session case, where the reason is the thing the user needs.
+
+    Args:
+        output: everything the probe wrote, stdout and stderr combined.
+        returncode: the probe's exit code, used only when it said nothing at all.
+
+    Returns:
+        The line carrying a status marker; failing that the last line, which is
+        nearer the verdict than the first.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return f"`--status` exited {returncode}"
+    for line in lines:
+        if line.startswith(_VERDICT_MARKERS):
+            return line
+    return lines[-1]
+
+
 async def probe_session(
     parts: list[str],
     # The bound belongs here rather than in a cancel scope at the call site: on
@@ -227,8 +256,7 @@ async def probe_session(
         return LinkedInHealth(False, f"`--status` gave no answer within {timeout_seconds:.0f}s")
 
     output = (stdout + stderr).decode("utf-8", errors="replace").strip()
-    detail = output.splitlines()[0].strip() if output else f"`--status` exited {process.returncode}"
-    return LinkedInHealth(process.returncode == 0, detail)
+    return LinkedInHealth(process.returncode == 0, _verdict_line(output, process.returncode))
 
 
 async def linkedin_health(parts: list[str], *, refresh: bool = False) -> LinkedInHealth:

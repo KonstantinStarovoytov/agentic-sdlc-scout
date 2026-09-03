@@ -30,6 +30,17 @@ PROFILE_DIR = "/home/u/.linkedin-mcp/profile"
 VALID_OUTPUT = f"✅ Session is valid (profile: {PROFILE_DIR})"
 NO_SESSION_OUTPUT = f"❌ No valid source session found at {PROFILE_DIR}"
 EXPIRED_OUTPUT = f"❌ Session expired or invalid (profile: {PROFILE_DIR})"
+UNVERIFIED_OUTPUT = "ℹ️ Source cookie validity is not verified in this mode"
+
+# Once a profile exists the command describes it before saying anything about the
+# session, so the verdict is never the first line. Only the no-profile case is
+# a single line, which is why stubs modelled on it hid this for a while.
+STATUS_HEADER = (
+    "Current runtime: macos-arm64-host\n"
+    "Source runtime: macos-arm64-host\n"
+    "Login generation: 866f5bdc-2424-42ee-bcbc-c03b3f362203\n"
+    f"Profile mode: source ({PROFILE_DIR})"
+)
 
 
 def _stub(tmp_path: Path, body: str) -> str:
@@ -115,6 +126,41 @@ class TestProbe:
         )
         health = await probe_session([binary], timeout_seconds=10)
         assert "No valid source session found" in health.detail
+
+    async def test_the_verdict_survives_the_status_header(self, tmp_path):
+        """An expired session prints the profile header first; the reason is below it.
+
+        This is the case the user is most likely to hit, and reporting
+        `Current runtime: …` back as the reason would tell them nothing.
+        """
+        binary = _stub(tmp_path, f'echo "{STATUS_HEADER}\n{EXPIRED_OUTPUT}"\nexit 1')
+        health = await probe_session([binary], timeout_seconds=10)
+        assert not health.authenticated
+        assert health.detail == EXPIRED_OUTPUT
+        assert "Current runtime" not in health.detail
+
+    async def test_a_valid_session_reports_the_verdict_not_the_header(self, tmp_path):
+        binary = _stub(tmp_path, f'echo "{STATUS_HEADER}\n{VALID_OUTPUT}"\nexit 0')
+        health = await probe_session([binary], timeout_seconds=10)
+        assert health.authenticated
+        assert health.detail == VALID_OUTPUT
+
+    async def test_the_unverified_foreign_runtime_note_is_surfaced(self, tmp_path):
+        """The server admits it did not check the cookie here, and exits 0 anyway.
+
+        We still trust the exit code, but the caveat has to reach the log rather
+        than be replaced by a runtime name.
+        """
+        binary = _stub(tmp_path, f'echo "{STATUS_HEADER}\n{UNVERIFIED_OUTPUT}"\nexit 0')
+        health = await probe_session([binary], timeout_seconds=10)
+        assert health.authenticated
+        assert health.detail == UNVERIFIED_OUTPUT
+
+    async def test_unmarked_output_falls_back_to_the_last_line(self, tmp_path):
+        """No marker to find, so guess at the end rather than the header."""
+        binary = _stub(tmp_path, 'echo "Current runtime: macos-arm64-host\nsomething odd"\nexit 1')
+        health = await probe_session([binary], timeout_seconds=10)
+        assert health.detail == "something odd"
 
     async def test_output_on_stderr_is_not_lost(self, tmp_path):
         binary = _stub(tmp_path, 'echo "boom" >&2\nexit 1')
