@@ -13,7 +13,8 @@ import logging
 from langchain_core.tools import tool
 from langgraph.store.base import BaseStore
 
-from ..config import get_config, get_settings
+from ..config import get_config
+from ..identity import current_identity, current_user_id
 from ..memory import jobs_ns, load_feedback, profile_ns, save_feedback
 from ..schemas import CandidateProfile, JobPosting, RequirementKind
 from ..scoring import aggregate_gaps, score_job
@@ -115,12 +116,11 @@ async def read_job_dossier(job_id: str) -> str:
     Returns:
         The dossier as text, with the raw description marked as untrusted data.
     """
-    settings = get_settings()
     store = _store()
     if store is None:
         return "Memory is unavailable; the dossier cannot be read."
 
-    item = await store.aget(jobs_ns(settings.scout_user_id), job_id)
+    item = await store.aget(jobs_ns(current_user_id()), job_id)
     if item is None:
         return (
             f"No vacancy {job_id} in memory. Check the id, or ask the orchestrator "
@@ -203,12 +203,19 @@ async def read_candidate_profile() -> str:
     Returns:
         The profile as text, or an explanation of why there is none to read.
     """
-    settings = get_settings()
+    identity = current_identity()
+    if not identity.may_read_owner_profile:
+        # Guests are already given an agent without this tool. The check is here
+        # because the namespace alone would not stop a guest whose id somehow
+        # matched the owner's, and because this is the one tool that returns the
+        # CV verbatim: employers, dates, and the evidence lines behind it.
+        return "The Candidate Profile belongs to the owner of this agent and is not readable here."
+
     store = _store()
     if store is None:
         return "Memory is unavailable; the Candidate Profile cannot be read."
 
-    item = await store.aget(profile_ns(settings.scout_user_id), "current")
+    item = await store.aget(profile_ns(current_user_id()), "current")
     if item is None:
         return (
             "The Candidate Profile has not been assembled, so there is nothing to write from. "
@@ -236,20 +243,19 @@ async def score_jobs(job_ids: list[str] | None = None) -> str:
     Returns:
         A markdown table of scores and verdicts, plus quoted evidence for the top matches.
     """
-    settings = get_settings()
     config = get_config()
     store = _store()
     if store is None:
         return "Memory is unavailable; there is nothing to score."
 
-    profile = await _load_profile(store, settings.scout_user_id)
+    profile = await _load_profile(store, current_user_id())
     if profile is None:
         return (
             "The Candidate Profile has not been assembled. Run bootstrap_profile — "
             "without a profile the score would be invention rather than assessment."
         )
 
-    jobs = await _load_jobs(store, settings.scout_user_id, job_ids)
+    jobs = await _load_jobs(store, current_user_id(), job_ids)
     if not jobs:
         return "There are no vacancies in memory. Run research_jobs first."
 
@@ -291,16 +297,15 @@ async def gap_analysis() -> str:
     Returns:
         A ranked list of missing skills with how many postings demand each.
     """
-    settings = get_settings()
     store = _store()
     if store is None:
         return "Memory is unavailable."
 
-    profile = await _load_profile(store, settings.scout_user_id)
+    profile = await _load_profile(store, current_user_id())
     if profile is None:
         return "The Candidate Profile has not been assembled. Run bootstrap_profile."
 
-    jobs = await _load_jobs(store, settings.scout_user_id, None)
+    jobs = await _load_jobs(store, current_user_id(), None)
     if not jobs:
         return "There are no vacancies in memory. Run research_jobs first."
 
@@ -330,12 +335,11 @@ async def remember_preference(note: str, company_to_avoid: str | None = None) ->
     Returns:
         Confirmation with the number of stored preferences and blocked companies.
     """
-    settings = get_settings()
     store = _store()
     if store is None:
         return "Memory is unavailable; the preference was not saved."
 
-    data = await load_feedback(store, settings.scout_user_id)
+    data = await load_feedback(store, current_user_id())
     notes = list(data.get("notes", []))
     denied = list(data.get("company_deny", []))
 
@@ -344,5 +348,5 @@ async def remember_preference(note: str, company_to_avoid: str | None = None) ->
     if company_to_avoid and company_to_avoid not in denied:
         denied.append(company_to_avoid)
 
-    await save_feedback(store, settings.scout_user_id, {"notes": notes, "company_deny": denied})
+    await save_feedback(store, current_user_id(), {"notes": notes, "company_deny": denied})
     return f"Noted. Stored preferences: {len(notes)}, companies on the stop-list: {len(denied)}."

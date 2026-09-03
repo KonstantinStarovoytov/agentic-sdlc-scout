@@ -23,6 +23,7 @@ from langgraph.store.base import BaseStore
 from typing_extensions import TypedDict
 
 from ..config import ScoutConfig, get_config, get_settings
+from ..identity import current_identity, current_user_id
 from ..memory import get_known_job_ids, jobs_ns
 from ..middleware.injection_guard import wrap_untrusted
 from ..models import chat_model
@@ -161,21 +162,21 @@ async def scan_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
 async def dedupe_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
     """Drop what was already seen and prefilter, before spending tokens or requests."""
     config = get_config()
-    settings = get_settings()
+    user_id = current_user_id()
     scanned = state.get("scanned") or []
 
     store = _resolve_store(runtime)
 
     known: set[str] = set()
     if store is not None:
-        known = await get_known_job_ids(store, settings.scout_user_id)
+        known = await get_known_job_ids(store, user_id)
 
     denied_companies: set[str] = set()
     if store is not None:
         try:
             from ..memory import load_feedback
 
-            feedback = await load_feedback(store, settings.scout_user_id)
+            feedback = await load_feedback(store, user_id)
             denied_companies = {c.lower() for c in feedback.get("company_deny", [])}
         except Exception as exc:
             logger.info("Feedback unavailable (%s); filtering without it", exc)
@@ -219,6 +220,17 @@ async def enrich_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
         job_description_from,
         linkedin_degradation_note,
     )
+
+    if current_identity().is_guest:
+        # This node reaches LinkedIn on its own rather than through the agent's
+        # toolset, so withholding the tools from a guest agent does not reach it.
+        # Without this the public endpoint would drive the owner's burner
+        # account, which is the one LinkedIn resource that can be banned.
+        notes.append(
+            "Running in public mode: vacancies are described from the open listing only, "
+            "without signing in to LinkedIn."
+        )
+        return {"enriched": fresh, "notes": notes}
 
     tools = await build_linkedin_tools()
     details_tool = next((t for t in tools if t.name == "get_job_details"), None)
@@ -315,14 +327,13 @@ async def extract_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]
 
 async def persist_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
     """Full dossiers go to the Store; only cards come out."""
-    settings = get_settings()
     enriched = state.get("enriched") or []
     notes: list[str] = []
 
     store = _resolve_store(runtime)
     saved = 0
     if store is not None:
-        namespace = jobs_ns(settings.scout_user_id)
+        namespace = jobs_ns(current_user_id())
         for job in enriched:
             try:
                 await store.aput(namespace, job.canonical_id, job.model_dump(mode="json"))

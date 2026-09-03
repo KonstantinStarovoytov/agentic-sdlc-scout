@@ -55,6 +55,10 @@ SKILLS_DIR = str(REPO_ROOT / "skills")
 FsTool = Literal["ls", "read_file", "write_file", "edit_file", "delete", "glob", "grep", "execute"]
 FS_TOOLS: list[FsTool] = ["ls", "read_file", "write_file", "edit_file", "glob", "grep"]
 
+# A guest run may look but not touch. Reading stays because skills are files and
+# the agent loses its own reference material without it.
+FS_TOOLS_READONLY: list[FsTool] = ["ls", "read_file", "glob", "grep"]
+
 # data/private is the only place holding the real email and phone number. The
 # model must not see them: they are substituted while rendering the PDF, outside
 # the context. Without this denial, the PII middleware would protect against
@@ -65,6 +69,19 @@ PRIVATE_PATHS = [
     str(REPO_ROOT / "data" / "private"),
 ]
 
+# The filesystem backend is rooted at the repository, and the repository root is
+# where `.env` lives. Denying only data/private left every key in the project —
+# OpenAI, Tavily, LangSmith, the database URL — one `read_file` call away, and
+# the agent reads hostile text by design: a vacancy description that talks it
+# into opening .env and quoting the result is the whole attack. The git
+# directory goes too; it carries the remote URL and any credentials in it.
+SECRET_PATHS = [
+    str(REPO_ROOT / ".env"),
+    str(REPO_ROOT / ".env.*"),
+    str(REPO_ROOT / ".git"),
+    str(REPO_ROOT / ".git" / "**"),
+]
+
 # The CV skills are read by cv-writer, not by the orchestrator: they are long and
 # there is no reason to hold them in the main context. Skills are not inherited,
 # so they are passed explicitly.
@@ -72,12 +89,21 @@ CV_SKILLS = [SKILLS_DIR]
 
 
 def build_private_deny() -> list[FilesystemPermission]:
-    """The deny rule protecting data/private, shared by the orchestrator and subagents."""
-    return [FilesystemPermission(operations=["read", "write"], paths=PRIVATE_PATHS, mode="deny")]
+    """Deny rules for private data and secrets, shared by the orchestrator and subagents."""
+    return [
+        FilesystemPermission(
+            operations=["read", "write"],
+            paths=[*PRIVATE_PATHS, *SECRET_PATHS],
+            mode="deny",
+        )
+    ]
 
 
 def build_filesystem_middleware(
-    backend: FilesystemBackend, permissions: list[FilesystemPermission]
+    backend: FilesystemBackend,
+    permissions: list[FilesystemPermission],
+    *,
+    tools: list[FsTool] | None = None,
 ) -> FilesystemMiddleware:
     """Filesystem middleware carrying the restricted toolset and the private-data denial.
 
@@ -88,24 +114,35 @@ def build_filesystem_middleware(
     of the same name. Without this, subagents would keep the full default
     toolset, including `delete`.
     """
-    return FilesystemMiddleware(backend=backend, tools=FS_TOOLS, _permissions=permissions)
+    return FilesystemMiddleware(
+        backend=backend, tools=tools or FS_TOOLS, _permissions=permissions
+    )
 
 
-async def build_tools() -> tuple[list[BaseTool], list[BaseTool]]:
-    """Return (orchestrator tools, read-only LinkedIn tools)."""
+async def build_tools(*, guest: bool = False) -> tuple[list[BaseTool], list[BaseTool]]:
+    """Return (orchestrator tools, read-only LinkedIn tools).
+
+    A guest gets neither LinkedIn nor anything that writes. The LinkedIn refusal
+    is not about the data — the guest source is public anyway — but about the
+    account: the burner session is a finite, bannable resource belonging to the
+    owner, and a stranger on a web page must not be able to spend it.
+    """
     from .tools.linkedin_mcp import build_linkedin_tools
 
-    linkedin = await build_linkedin_tools()
+    linkedin: list[BaseTool] = [] if guest else await build_linkedin_tools()
     tavily = build_tavily_tools()
 
     orchestrator: list[BaseTool] = [
         research_jobs,
         score_jobs,
         gap_analysis,
-        remember_preference,
-        bootstrap_profile,
         *tavily,
     ]
+    if not guest:
+        # Both write to the owner's memory: one stores preferences, the other
+        # reads the CV out of data/private and rewrites the Candidate Profile.
+        orchestrator.extend([remember_preference, bootstrap_profile])
+
     return orchestrator, linkedin
 
 
@@ -115,6 +152,7 @@ def build_subagents(
     *,
     backend: FilesystemBackend,
     permissions: list[FilesystemPermission],
+    guest: bool = False,
 ) -> list[Any]:
     """Subagents with isolated context.
 
@@ -126,7 +164,12 @@ def build_subagents(
     unrestricted one the harness would otherwise build for it.
     """
     settings = get_settings()
-    return [
+    fs_tools: list[FsTool] = FS_TOOLS_READONLY if guest else FS_TOOLS
+
+    def filesystem() -> FilesystemMiddleware:
+        return build_filesystem_middleware(backend, permissions, tools=fs_tools)
+
+    subagents: list[Any] = [
         {
             "name": "job-analyst",
             "description": (
@@ -136,7 +179,7 @@ def build_subagents(
             "system_prompt": JOB_ANALYST_PROMPT,
             "tools": [read_job_dossier, *linkedin, *tavily],
             "model": chat_model(settings.scout_model_fast),
-            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "middleware": [filesystem()],
             "permissions": permissions,
         },
         {
@@ -152,7 +195,7 @@ def build_subagents(
             "tools": [read_job_dossier, read_candidate_profile, render_pdf],
             "skills": CV_SKILLS,
             "model": chat_model(settings.scout_model_smart),
-            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "middleware": [filesystem()],
             "permissions": permissions,
         },
         {
@@ -168,25 +211,40 @@ def build_subagents(
                 ],
             ],
             "model": chat_model(settings.scout_model_fast),
-            "middleware": [build_filesystem_middleware(backend, permissions)],
+            "middleware": [filesystem()],
             "permissions": permissions,
         },
     ]
+
+    if guest:
+        # cv-writer is the one subagent holding read_candidate_profile and
+        # render_pdf, so it is the one that reaches the owner's CV and their real
+        # contacts. A guest has no profile to write from in any case.
+        subagents = [s for s in subagents if s["name"] != "cv-writer"]
+
+    return subagents
 
 
 async def build_agent(
     store: BaseStore | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    guest: bool = False,
 ):
     """Assemble the agent.
 
     `store` and `checkpointer` are left empty under `langgraph dev`: the platform
     supplies its own. For local runs, main.py passes them in.
+
+    `guest` builds the restricted agent served to visitors of the personal page.
+    The restriction is structural rather than instructed: a capability the guest
+    agent was never given cannot be talked into existence by a clever prompt,
+    which is the only guarantee worth having on a public endpoint.
     """
     settings = get_settings()
     config = get_config()
 
-    orchestrator_tools, linkedin = await build_tools()
+    orchestrator_tools, linkedin = await build_tools(guest=guest)
     tavily = build_tavily_tools()
 
     taxonomy = None
@@ -203,13 +261,19 @@ async def build_agent(
         TodoListMiddleware(),
         # A custom FilesystemMiddleware instead of the built-in one is the only
         # way to withhold `execute` from the agent.
-        build_filesystem_middleware(backend, private_deny),
+        build_filesystem_middleware(
+            backend, private_deny, tools=FS_TOOLS_READONLY if guest else FS_TOOLS
+        ),
         LinkedInBudgetMiddleware(config.budgets),
         InjectionGuardMiddleware(),
         *build_pii_middleware(),
         *build_cost_middleware(config.budgets),
         SummarizationMiddleware(
-            model=chat_model(settings.scout_model_fast),
+            # Tagged out of the token stream. This model writes a summary of the
+            # conversation so far, which is bookkeeping, not an answer; without
+            # the tag it would be typed into the user's chat window the moment
+            # the context crosses the trigger.
+            model=chat_model(settings.scout_model_fast, tags=["langsmith:nostream"]),
             trigger=("fraction", 0.75),
             keep=("messages", 20),
         ),
@@ -218,9 +282,11 @@ async def build_agent(
     return create_deep_agent(
         name="agentic-sdlc-scout",
         model=chat_model(settings.scout_model_smart),
-        system_prompt=build_system_prompt(taxonomy, config),
+        system_prompt=build_system_prompt(taxonomy, config, guest=guest),
         tools=orchestrator_tools,
-        subagents=build_subagents(linkedin, tavily, backend=backend, permissions=private_deny),
+        subagents=build_subagents(
+            linkedin, tavily, backend=backend, permissions=private_deny, guest=guest
+        ),
         middleware=middleware,
         backend=backend,
         permissions=private_deny,

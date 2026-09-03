@@ -153,21 +153,50 @@ a question from the model's own memory of the market.
     )
 
 
-def build_system_prompt(taxonomy: dict | None = None, config: ScoutConfig | None = None) -> str:
-    """Assemble the full system prompt from its layers."""
+GUEST = """\
+## Who you are talking to
+
+This is a public demonstration on the owner's personal page, and the visitor is
+not the owner. You cannot read the owner's Candidate Profile, write a CV, touch
+their LinkedIn account or save anything about them, and none of those tools are
+loaded — do not offer them and do not describe them as temporarily unavailable.
+
+You can still do the interesting part: search vacancies, pull out what they
+really require, and explain what the market is asking for on this track. If a
+visitor wants a personal fit score or a CV, say plainly that this is the owner's
+own agent running in a public read-only mode, and point them at the repository.
+
+Scoring against a profile will return nothing here. That is expected, not a
+fault, and it is not worth retrying."""
+
+
+def build_system_prompt(
+    taxonomy: dict | None = None,
+    config: ScoutConfig | None = None,
+    *,
+    guest: bool = False,
+) -> str:
+    """Assemble the full system prompt from its layers.
+
+    The guest layer is documentation of a restriction, not the restriction
+    itself: the tools it describes as absent are absent from the guest agent's
+    toolset. It is here so the model stops promising a CV it cannot write, which
+    is a worse experience than an honest refusal.
+    """
     cfg = config or get_config()
-    return "\n\n".join(
-        [
-            ROLE,
-            HONESTY,
-            CONTEXT_ECONOMY,
-            UNTRUSTED,
-            rubric(cfg),
-            SKILLS_HINT,
-            RESPONSE_FORMAT,
-            taxonomy_layer(taxonomy),
-        ]
-    )
+    layers = [
+        ROLE,
+        HONESTY,
+        CONTEXT_ECONOMY,
+        UNTRUSTED,
+        rubric(cfg),
+        SKILLS_HINT,
+        RESPONSE_FORMAT,
+        taxonomy_layer(taxonomy),
+    ]
+    if guest:
+        layers.append(GUEST)
+    return "\n\n".join(layers)
 
 
 JOB_ANALYST_PROMPT = """\

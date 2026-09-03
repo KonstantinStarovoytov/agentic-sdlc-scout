@@ -18,6 +18,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..config import REPO_ROOT, get_config, get_settings
+from ..identity import current_identity, current_user_id
 from ..memory import save_profile
 from ..models import chat_model
 from ..schemas import CandidateProfile
@@ -140,6 +141,12 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
     settings = get_settings()
     config = get_config()
 
+    if not current_identity().may_write:
+        # Reads the CV out of data/private and writes the owner's profile to
+        # memory. A guest run has no business doing either, and the tool is not
+        # attached to a guest agent; this is the second lock on the same door.
+        return "Assembling the Candidate Profile is reserved for the owner of this agent."
+
     if not settings.openai_api_key:
         return "OPENAI_API_KEY is required: merging the sources into a profile is a model call."
 
@@ -205,7 +212,7 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
             {"role": "user", "content": blocks},
         ]
     )
-    profile = profile.model_copy(update={"user_id": settings.scout_user_id})
+    profile = profile.model_copy(update={"user_id": current_user_id()})
 
     stored = False
     try:
@@ -213,7 +220,7 @@ async def bootstrap_profile(cv_path: str | None = None) -> str:
 
         store = get_store()
         if store is not None:
-            await save_profile(store, settings.scout_user_id, profile)
+            await save_profile(store, current_user_id(), profile)
             stored = True
     except Exception as exc:
         logger.warning("Profile was not saved: %s", exc)
