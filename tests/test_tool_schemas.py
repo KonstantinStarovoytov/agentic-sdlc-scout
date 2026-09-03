@@ -88,5 +88,6 @@ class TestExtractSchema:
 class TestDegradedMode:
     def test_no_key_means_no_tools(self, monkeypatch):
         """A missing key drops the tools rather than failing the run."""
-        monkeypatch.setattr("scout.tools.tavily.get_settings", lambda: Settings(tavily_api_key=None))
+        settings = Settings(tavily_api_key=None)
+        monkeypatch.setattr("scout.tools.tavily.get_settings", lambda: settings)
         assert build_tavily_tools() == []
