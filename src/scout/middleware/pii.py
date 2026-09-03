@@ -1,4 +1,9 @@
-"""Personal data must not travel into traces.
+"""The owner's personal data must not travel into traces.
+
+Redaction applies to user input only. Tool results carry other people's
+contacts inside untrusted text, and rewriting them would damage the very
+material the agent is meant to analyse — see `build_pii_middleware` for the
+full reasoning.
 
 Phone and email from the CV exist as placeholders in prompts; the real values are
 substituted only when the PDF is rendered, from a local file (see
@@ -56,7 +61,14 @@ def redact_contacts(text: str) -> tuple[str, dict[str, str]]:
 
 
 def build_pii_middleware() -> list[AgentMiddleware]:
-    """Redact email and phone in user input and in tool results.
+    """Redact email and phone in user input. Tool results are left untouched.
+
+    The asymmetry is intentional. User input is where the owner's own contacts
+    appear, and those must not reach a provider or a trace. Tool results are the
+    untrusted side: they are job descriptions, company pages and profiles, whose
+    contacts belong to other people and are part of the text being analysed.
+    Redacting them would corrupt the material the rubric reads and destroy the
+    recruiter address the user needs in order to apply.
 
     URLs are deliberately left alone: links to a posting and to a profile are
     working data, without which the agent can neither cite a source nor open a
