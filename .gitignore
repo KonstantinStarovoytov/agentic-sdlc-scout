@@ -27,3 +27,10 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+.neon
+
+# Neon's own agent skills, installed per-directory by `neon skills`. Useful
+# locally, but vendor documentation does not belong in this repository — and
+# note they live here rather than in skills/, which is loaded into the agent.
+.agents/
+skills-lock.json
