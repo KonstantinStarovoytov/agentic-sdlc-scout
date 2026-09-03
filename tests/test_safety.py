@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 from deepagents.middleware.filesystem import FilesystemPermission, _check_fs_permission
 
@@ -14,7 +16,19 @@ from scout.middleware.injection_guard import (
 )
 from scout.middleware.linkedin_budget import LinkedInBudgetMiddleware
 from scout.middleware.pii import redact_contacts
-from scout.tools.linkedin_mcp import FORBIDDEN_TOOLS, READ_ONLY_TOOLS, filter_read_only
+from scout.tools import linkedin_mcp
+from scout.tools.linkedin_mcp import (
+    FORBIDDEN_TOOLS,
+    READ_ONLY_TOOLS,
+    REQUIRED_LAUNCH_FLAG,
+    LinkedInHealth,
+    UnsafeLinkedInCommandError,
+    build_linkedin_tools,
+    ensure_safe_command,
+    filter_read_only,
+    linkedin_degradation_note,
+    reset_linkedin_health,
+)
 
 
 class _FakeTool:
@@ -37,6 +51,170 @@ class TestToolsetBoundaries:
 
     def test_forbidden_never_intersects_allowed(self):
         assert not (READ_ONLY_TOOLS & FORBIDDEN_TOOLS)
+
+    def test_allowlist_is_exactly_what_the_server_offers(self):
+        """Every entry must name a tool that exists in mcp-server-linkedin 4.23.3."""
+        assert set(READ_ONLY_TOOLS) == {
+            "search_jobs",
+            "get_job_details",
+            "get_person_profile",
+            "get_company_profile",
+            "get_company_employees",
+            "search_people",
+        }
+
+    def test_recommended_jobs_is_not_claimed(self):
+        """The server has no such tool: the entry matched nothing and promised a lot."""
+        assert "get_recommended_jobs" not in READ_ONLY_TOOLS
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "send_message",
+            "connect_with_person",
+            "get_inbox",
+            "get_conversation",
+            "search_conversations",
+            "get_feed",
+            "get_my_profile",
+            "get_saved_jobs",
+        ],
+    )
+    def test_writing_and_private_tools_stay_out(self, name):
+        """Tools the server grew after the allowlist was written must not leak in."""
+        assert filter_read_only([_FakeTool(name)]) == []
+
+
+class TestLinkedInLaunchSafety:
+    """Without `--no-auto-import` the server adopts the browser's live session.
+
+    On this machine that is the owner's real LinkedIn profile, which is the one
+    thing the burner account exists to prevent. The flag lives in a `.env` string,
+    so the code has to be the thing that will not let it go missing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_state(self):
+        reset_linkedin_health()
+        yield
+        reset_linkedin_health()
+
+    def test_a_command_without_the_flag_is_refused(self):
+        with pytest.raises(UnsafeLinkedInCommandError):
+            ensure_safe_command(["mcp-server-linkedin", "--transport", "stdio"])
+
+    def test_a_command_with_the_flag_is_accepted(self):
+        ensure_safe_command(["mcp-server-linkedin", "--transport", "stdio", REQUIRED_LAUNCH_FLAG])
+
+    def test_the_refusal_explains_what_would_have_happened(self):
+        with pytest.raises(UnsafeLinkedInCommandError) as excinfo:
+            ensure_safe_command(["mcp-server-linkedin"])
+        message = str(excinfo.value)
+        assert REQUIRED_LAUNCH_FLAG in message
+        assert "browser" in message
+        assert "SCOUT_LINKEDIN_MCP_COMMAND" in message
+
+    async def test_the_server_is_never_started_without_the_flag(self, monkeypatch):
+        monkeypatch.setattr(
+            linkedin_mcp, "_command_parts", lambda: ["mcp-server-linkedin", "--transport", "stdio"]
+        )
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("the server must not be probed or started")
+
+        monkeypatch.setattr(linkedin_mcp, "probe_session", forbidden)
+
+        assert await build_linkedin_tools() == []
+        assert REQUIRED_LAUNCH_FLAG in (linkedin_degradation_note() or "")
+
+    def test_the_configured_command_carries_the_flag(self):
+        """The real `.env`, when LinkedIn is configured at all."""
+        from scout.config import Settings
+
+        command = Settings().scout_linkedin_mcp_command
+        if not (command and command.strip()):
+            pytest.skip("LinkedIn MCP is not configured in this environment")
+        ensure_safe_command(shlex.split(command))
+
+
+class TestLinkedInSessionHealth:
+    """An expired session must degrade visibly, not silently.
+
+    The server registers and lists all of its tools with no session at all, so a
+    non-empty tool list is not evidence of being logged in. Without the `--status`
+    check the agent attaches six tools, never takes the guest fallback, and
+    collects nothing while every call fails inside its own result.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_state(self):
+        reset_linkedin_health()
+        yield
+        reset_linkedin_health()
+
+    @pytest.fixture
+    def configured(self, monkeypatch):
+        monkeypatch.setattr(
+            linkedin_mcp, "_command_parts", lambda: ["/bin/mcp-server-linkedin", "--no-auto-import"]
+        )
+
+    def _health(self, monkeypatch, verdict: LinkedInHealth):
+        async def probe(parts, timeout_seconds=linkedin_mcp.STATUS_TIMEOUT_SECONDS):
+            return verdict
+
+        monkeypatch.setattr(linkedin_mcp, "probe_session", probe)
+
+    async def test_an_expired_session_attaches_no_tools(self, monkeypatch, configured):
+        self._health(
+            monkeypatch, LinkedInHealth(False, "❌ Session expired or invalid (profile: /p)")
+        )
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("the MCP server must not be started without a session")
+
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", forbidden, raising=True
+        )
+        assert await build_linkedin_tools() == []
+
+    async def test_the_user_is_told_why_and_how_to_fix_it(self, monkeypatch, configured):
+        self._health(
+            monkeypatch, LinkedInHealth(False, "❌ Session expired or invalid (profile: /p)")
+        )
+        await build_linkedin_tools()
+        note = linkedin_degradation_note() or ""
+        assert "Session expired" in note
+        assert "--login" in note
+
+    async def test_a_healthy_session_attaches_the_allowlisted_tools(self, monkeypatch, configured):
+        self._health(monkeypatch, LinkedInHealth(True, "✅ Session is valid (profile: /p)"))
+
+        class _FakeClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self):
+                return [_FakeTool("search_jobs"), _FakeTool("send_message")]
+
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", _FakeClient, raising=True
+        )
+        tools = await build_linkedin_tools()
+        assert {t.name for t in tools} == {"search_jobs"}
+        assert linkedin_degradation_note() is None
+
+    async def test_an_unconfigured_server_degrades_too(self, monkeypatch):
+        monkeypatch.setattr(linkedin_mcp, "_command_parts", lambda: None)
+        assert await build_linkedin_tools() == []
+        assert "not configured" in (linkedin_degradation_note() or "")
+
+    async def test_the_degradation_note_reaches_the_run_report(self, monkeypatch, configured):
+        """A missing note is the whole bug: a run then looks like a run with no jobs."""
+        from scout.graphs.research import enrich_node
+
+        self._health(monkeypatch, LinkedInHealth(False, "❌ No valid source session found at /p"))
+        result = await enrich_node({"fresh": []}, None)
+        assert any("No valid source session" in note for note in result["notes"])
 
 
 class TestInjectionGuard:

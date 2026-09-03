@@ -80,8 +80,24 @@ class LinkedInHealth:
 
 
 _health: LinkedInHealth | None = None
-_health_lock = asyncio.Lock()
+_health_lock: asyncio.Lock | None = None
+_health_lock_loop: asyncio.AbstractEventLoop | None = None
 _degradation: str | None = None
+
+
+def _probe_lock() -> asyncio.Lock:
+    """One probe at a time, in whichever loop is running.
+
+    Built lazily rather than at import: an `asyncio.Lock` binds to the loop it
+    first blocks on, so a module-level one starts raising as soon as a second
+    loop touches it — a second `asyncio.run`, or the next test.
+    """
+    global _health_lock, _health_lock_loop
+    loop = asyncio.get_running_loop()
+    if _health_lock is None or _health_lock_loop is not loop:
+        _health_lock = asyncio.Lock()
+        _health_lock_loop = loop
+    return _health_lock
 
 
 def linkedin_degradation_note() -> str | None:
@@ -177,6 +193,10 @@ async def probe_session(
     invalid (profile: …)` and on a validation error. The exit code is therefore
     the signal, and the text is kept only so the reason is legible to the user.
 
+    One case is optimistic by the server's own admission: on a foreign runtime it
+    prints that the source cookie was not verified and still exits 0. That is a
+    weaker guarantee than the rest, and the tool results remain the backstop.
+
     Args:
         parts: the launch command split into argv.
         timeout_seconds: how long to wait before giving up on the probe.
@@ -226,7 +246,7 @@ async def linkedin_health(parts: list[str], *, refresh: bool = False) -> LinkedI
         The verdict.
     """
     global _health
-    async with _health_lock:
+    async with _probe_lock():
         if _health is None or refresh:
             _health = await probe_session(parts)
         return _health
