@@ -20,9 +20,11 @@ Two things about the server itself drive the rest of this module:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
@@ -289,6 +291,61 @@ def reset_linkedin_health() -> None:
     global _health, _degradation
     _health = None
     _degradation = None
+
+
+def _block_text(block: Any) -> str | None:
+    """Text out of one MCP content block, whether it arrives as a dict or an object."""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        text = block.get("text")
+        return text if isinstance(text, str) else None
+    text = getattr(block, "text", None)
+    return text if isinstance(text, str) else None
+
+
+def job_description_from(raw: Any) -> str:
+    """Pull the readable posting out of a `get_job_details` result.
+
+    The tool answers with MCP content blocks wrapping a JSON document, and the
+    posting itself sits at `sections.job_posting`. Stringifying the result
+    instead — which is what this replaced — hands the model a Python repr of a
+    list of dicts around escaped JSON. It survives that, but two things go wrong:
+    the wrapper costs tokens on every posting, and the length cap in the extract
+    node then measures the repr rather than the description, so on a long posting
+    the requirements are what gets truncated away.
+
+    Args:
+        raw: whatever the tool returned.
+
+    Returns:
+        The posting text, falling back to the raw text and finally to `str(raw)`
+        so a shape we have not seen still reaches the model rather than being
+        dropped.
+    """
+    blocks = raw if isinstance(raw, list) else [raw]
+    texts = [text for text in (_block_text(block) for block in blocks) if text]
+    if not texts:
+        return str(raw)
+
+    joined = "\n".join(texts)
+    try:
+        document = json.loads(joined)
+    except (TypeError, ValueError):
+        return joined
+
+    if isinstance(document, dict):
+        sections = document.get("sections")
+        if isinstance(sections, dict):
+            posting = sections.get("job_posting")
+            if isinstance(posting, str) and posting.strip():
+                return posting
+        for key in ("description", "text", "content"):
+            value = document.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+    return joined
 
 
 def filter_read_only(tools: list[BaseTool]) -> list[BaseTool]:

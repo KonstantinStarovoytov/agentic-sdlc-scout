@@ -214,7 +214,11 @@ async def enrich_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
     fresh = state.get("fresh") or []
     notes: list[str] = []
 
-    from ..tools.linkedin_mcp import build_linkedin_tools, linkedin_degradation_note
+    from ..tools.linkedin_mcp import (
+        build_linkedin_tools,
+        job_description_from,
+        linkedin_degradation_note,
+    )
 
     tools = await build_linkedin_tools()
     details_tool = next((t for t in tools if t.name == "get_job_details"), None)
@@ -242,7 +246,8 @@ async def enrich_node(state: ResearchState, runtime: Runtime) -> dict[str, Any]:
             break
         try:
             raw = await details_tool.ainvoke({"job_id": job.canonical_id.removeprefix("li:")})
-            job = job.model_copy(update={"description": str(raw), "source": "linkedin_mcp"})
+            description = job_description_from(raw)
+            job = job.model_copy(update={"description": description, "source": "linkedin_mcp"})
         except Exception as exc:
             logger.info("Could not fetch the description for %s: %s", job.canonical_id, exc)
         enriched.append(job)
