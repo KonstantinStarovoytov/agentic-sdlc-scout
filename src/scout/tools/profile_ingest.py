@@ -53,7 +53,10 @@ def extract_text_from_file(path: Path | str) -> str:
         reader = PdfReader(str(file_path))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
 
-    if suffix in (".docx", ".doc"):
+    # `.doc` is deliberately absent: python-docx reads the OOXML container only,
+    # and handing it the legacy binary format buries the real problem under a
+    # library error. It falls through to the message below instead.
+    if suffix == ".docx":
         import docx
 
         document = docx.Document(str(file_path))
